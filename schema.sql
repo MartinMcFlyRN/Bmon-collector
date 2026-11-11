@@ -67,3 +67,13 @@ CREATE TABLE IF NOT EXISTS events (
   KEY idx_host_service (host_id, service, collected_at),
   CONSTRAINT fk_events_host FOREIGN KEY (host_id) REFERENCES hosts (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Gruppi dei servizi (direttiva "group" del monitrc). Riscritti a ogni report.
+CREATE TABLE IF NOT EXISTS service_groups (
+  host_id    BIGINT UNSIGNED NOT NULL,
+  group_name VARCHAR(255) NOT NULL,
+  service    VARCHAR(255) NOT NULL,
+  PRIMARY KEY (host_id, group_name, service),
+  KEY idx_group (group_name),
+  CONSTRAINT fk_groups_host FOREIGN KEY (host_id) REFERENCES hosts (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

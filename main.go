@@ -28,7 +28,7 @@ import (
 // build con -ldflags "-X main.Version=0.1.0-dev+abc123".
 const Name = "Bmon collector"
 
-var Version = "0.1.0"
+var Version = "0.2.0"
 
 type config struct {
 	listen         string
@@ -178,7 +178,11 @@ func (s *server) handleCollector(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.checkAuth(r) {
 		s.stats.rejected.Add(1)
-		s.log.Warn("autenticazione fallita", "remote", ip, "ua", r.UserAgent())
+		user, _, hasAuth := r.BasicAuth() // la password non viene mai loggata
+		if !hasAuth {
+			user = "(nessuna credenziale)"
+		}
+		s.log.Warn("autenticazione fallita", "remote", ip, "utente", user, "ua", r.UserAgent())
 		w.Header().Set("WWW-Authenticate", `Basic realm="bmon-collector"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

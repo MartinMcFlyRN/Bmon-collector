@@ -112,3 +112,17 @@ func TestRejectGarbage(t *testing.T) {
 		}
 	}
 }
+
+func TestParseGroups(t *testing.T) {
+	r := load(t, "groups.xml")
+	h24 := r.Groups["H24"]
+	if len(h24) != 2 || h24[0] != "root" || h24[1] != "sshd" {
+		t.Fatalf("H24: %#v", r.Groups)
+	}
+	if len(r.Groups["web"]) != 1 || r.Groups["web"][0] != "root" {
+		t.Fatalf("web: %#v", r.Groups)
+	}
+	if len(load(t, "status.xml").Groups) != 0 {
+		t.Fatal("senza gruppi la mappa deve essere vuota")
+	}
+}

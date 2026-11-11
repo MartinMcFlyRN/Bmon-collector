@@ -24,6 +24,8 @@ type Report struct {
 	Platform    Platform
 	Services    []Service
 	Events      []Event
+	// Groups: nome gruppo -> servizi, dalle direttive "group" del monitrc.
+	Groups map[string][]string
 }
 
 type Server struct {
@@ -275,6 +277,25 @@ func ParseReport(body []byte) (*Report, error) {
 			svc.Data[k] = v
 		}
 		r.Services = append(r.Services, svc)
+	}
+
+	// <servicegroups><servicegroup name="H24"><service>nginx</service>...</servicegroup></servicegroups>
+	for _, g := range root.get("servicegroups").childrenNamed("servicegroup") {
+		name := strings.TrimSpace(g.attrs["name"])
+		if name == "" {
+			name = g.str("name") // per sicurezza, se in qualche versione fosse un figlio
+		}
+		if name == "" {
+			continue
+		}
+		if r.Groups == nil {
+			r.Groups = make(map[string][]string)
+		}
+		for _, sv := range g.childrenNamed("service") {
+			if n := strings.TrimSpace(sv.text.String()); n != "" {
+				r.Groups[name] = append(r.Groups[name], n)
+			}
+		}
 	}
 
 	for _, e := range root.childrenNamed("event") {

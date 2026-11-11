@@ -1,6 +1,6 @@
 # Bmon collector
 
-Versione **0.1.0**. Primo componente di Bmon, il sostituto di M/Monit: riceve i report che gli agent Monit
+Versione **0.2.0**. Primo componente di Bmon, il sostituto di M/Monit: riceve i report che gli agent Monit
 inviano con `set mmonit` e li salva su MySQL/MariaDB.
 
 Usa **lo stesso protocollo di M/Monit** (POST XML su `/collector` con Basic Auth),
@@ -12,6 +12,7 @@ Cosa fa:
 - registra gli host per `monit_id` (il contenuto di `.monit.id`): hostname, versione, OS, CPU/RAM, poll
 - tiene lo **stato corrente** di ogni servizio (status, monitor, data della raccolta, quando è cambiato lo status) e tutte le metriche specifiche del tipo in una colonna JSON
 - elimina i servizi che spariscono dal monitrc
+- salva i **gruppi** dei servizi (direttiva `group` del monitrc) nella tabella `service_groups`
 - salva lo **storico eventi**, senza duplicati quando Monit li reinvia dalla eventqueue
 - segnala nel log le VM clonate con lo stesso `.monit.id` (stesso id, hostname che cambia)
 - espone `/healthz` (ping al DB e contatori)
@@ -51,7 +52,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES
   ON bmon_collector.* TO 'bmon_collector'@'localhost';
 ```
 
-Le tabelle (`hosts`, `services`, `events`) vengono create all'avvio, vedi `schema.sql`.
+Le tabelle (`hosts`, `services`, `events`, `service_groups`) vengono create all'avvio, vedi `schema.sql`.
 MySQL ≥ 5.7 o MariaDB ≥ 10.2. Le transazioni usano READ COMMITTED: se il server
 MySQL ha il binlog attivo deve essere `binlog_format=ROW` (il default da MySQL 5.7.7).
 
@@ -121,6 +122,18 @@ ORDER BY s.status_changed_at;
 SELECT h.hostname, s.name, JSON_EXTRACT(s.data, '$.block.percent') AS pct
 FROM services s JOIN hosts h ON h.id = s.host_id
 WHERE s.type = 0 AND JSON_EXTRACT(s.data, '$.block.percent') > 85;
+
+-- stato di tutti i servizi del gruppo H24, su tutti gli host
+SELECT h.hostname, s.name, s.status, s.status_changed_at
+FROM service_groups g
+JOIN hosts h    ON h.id = g.host_id
+JOIN services s ON s.host_id = g.host_id AND s.name = g.service
+WHERE g.group_name = 'H24'
+ORDER BY s.status <> 0 DESC, h.hostname;
+
+-- gruppi definiti e quanti servizi ne fanno parte
+SELECT group_name, COUNT(*) servizi, COUNT(DISTINCT host_id) host
+FROM service_groups GROUP BY group_name ORDER BY group_name;
 
 -- ultimi eventi
 SELECT h.hostname, e.service, e.state, e.message, e.collected_at

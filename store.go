@@ -134,6 +134,9 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 		`DELETE FROM services WHERE host_id = ? AND updated_at <> ?`, hostID, now); err != nil {
 		return fmt.Errorf("pulizia servizi: %w", err)
 	}
+	if err := s.replaceGroups(ctx, tx, hostID, r.Groups); err != nil {
+		return fmt.Errorf("gruppi: %w", err)
+	}
 	for _, e := range r.Events {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT IGNORE INTO events
@@ -208,6 +211,31 @@ func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAdd
 		  last_seen=?
 		WHERE id=?`, append(args, id)...)
 	return id, err
+}
+
+// replaceGroups riscrive i gruppi dell'host. Sono poche righe per host,
+// quindi delete+insert è più semplice (e altrettanto economico) di un diff.
+func (s *Store) replaceGroups(ctx context.Context, tx *sql.Tx, hostID uint64, groups map[string][]string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM service_groups WHERE host_id = ?`, hostID); err != nil {
+		return err
+	}
+	var q strings.Builder
+	var args []any
+	for g, svcs := range groups {
+		for _, sv := range svcs {
+			if len(args) == 0 {
+				q.WriteString(`INSERT IGNORE INTO service_groups (host_id, group_name, service) VALUES (?,?,?)`)
+			} else {
+				q.WriteString(`,(?,?,?)`)
+			}
+			args = append(args, hostID, trunc(g, 255), trunc(sv, 255))
+		}
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, q.String(), args...)
+	return err
 }
 
 const serviceCols = 12
