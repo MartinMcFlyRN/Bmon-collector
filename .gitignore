@@ -31,3 +31,7 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Binario e pacchetti di build
+/bmon-collector
+*.tar.gz

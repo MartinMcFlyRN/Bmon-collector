@@ -1,0 +1,31 @@
+[Unit]
+Description=Bmon collector (sostituto di M/Monit)
+After=network-online.target mariadb.service mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bmon-collector
+Group=bmon-collector
+# BMON_DSN, BMON_AUTH, BMON_LISTEN... (file 0600, contiene password)
+EnvironmentFile=/etc/bmon-collector/env
+ExecStart=/usr/local/bin/bmon-collector
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
