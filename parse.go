@@ -13,9 +13,9 @@ import (
 	"unicode/utf8"
 )
 
-// Report è il contenuto di un singolo POST di Monit verso /collector.
-// Monit invia sempre lo status completo di tutti i servizi; se il POST è
-// stato scatenato da un evento, contiene in più un elemento <event>.
+// Report is the content of a single POST from Monit to /collector.
+// Monit always sends the full status of every service; when the POST was
+// triggered by an event it also carries an <event> element.
 type Report struct {
 	MonitID     string
 	Incarnation int64
@@ -24,7 +24,7 @@ type Report struct {
 	Platform    Platform
 	Services    []Service
 	Events      []Event
-	// Groups: nome gruppo -> servizi, dalle direttive "group" del monitrc.
+	// Groups: group name -> services, from the "group" statements in monitrc.
 	Groups map[string][]string
 }
 
@@ -53,43 +53,43 @@ type Service struct {
 	Name          string
 	Type          int64
 	CollectedAt   time.Time
-	Status        int64 // bitmask degli eventi in errore, 0 = OK
+	Status        int64 // bitmask of failing events, 0 = OK
 	StatusHint    int64
-	Monitor       int64 // 0 = non monitorato, 1 = monitorato, 2 = in inizializzazione
+	Monitor       int64 // 0 = not monitored, 1 = monitored, 2 = initializing
 	MonitorMode   int64
 	OnReboot      int64
 	PendingAction int64
-	Data          map[string]any // campi specifici del tipo (cpu, memoria, block, port, ...)
+	Data          map[string]any // type-specific fields (cpu, memory, block, port, ...)
 }
 
 type Event struct {
 	CollectedAt time.Time
 	Service     string
 	ServiceType int64
-	ID          int64 // tipo di evento (bitmask Event_*), es. 0x200 = NonExist
+	ID          int64 // event type (Event_* bitmask), e.g. 0x200 = NonExist
 	State       int64 // 0 succeeded, 1 failed, 2 changed, 3 changed not, 4 init
 	Action      int64
 	Message     string
 }
 
-// Tipi di servizio Monit (Service_Type).
+// Monit service types (Service_Type).
 var ServiceTypeNames = map[int64]string{
 	0: "filesystem", 1: "directory", 2: "file", 3: "process", 4: "host",
 	5: "system", 6: "fifo", 7: "program", 8: "net",
 }
 
-// Campi comuni a tutti i servizi: vanno in colonne dedicate, non in Data.
+// Fields common to all services: stored in dedicated columns, not in Data.
 var commonServiceFields = map[string]bool{
 	"name": true, "type": true, "collected_sec": true, "collected_usec": true,
 	"status": true, "status_hint": true, "monitor": true, "monitormode": true,
 	"onreboot": true, "pendingaction": true,
 }
 
-// Foglie da tenere sempre come stringa anche se sembrano numeri.
+// Leaves always kept as strings even when they look like numbers.
 var stringLeaves = map[string]bool{"mode": true, "fsflags": true, "request": true}
 
-// node è un albero XML generico: lo schema di Monit cambia tra le versioni
-// e tra i tipi di servizio, quindi leggiamo tutto e poi estraiamo ciò che serve.
+// node is a generic XML tree: Monit's schema varies across versions and
+// service types, so we read everything and then pick what we need.
 type node struct {
 	name     string
 	attrs    map[string]string
@@ -131,9 +131,9 @@ func (n *node) int(path ...string) int64 {
 }
 
 func parseTree(body []byte) (*node, error) {
-	// Monit dichiara ISO-8859-1 ma di fatto spedisce i byte così come sono
-	// (spesso UTF-8). Se il body è UTF-8 valido lo usiamo tale e quale,
-	// altrimenti lo convertiamo da Latin-1.
+	// Monit declares ISO-8859-1 but actually sends the bytes as they are
+	// (often UTF-8). If the body is valid UTF-8 we use it unchanged,
+	// otherwise we convert it from Latin-1.
 	if !utf8.Valid(body) {
 		body = latin1ToUTF8(body)
 	}
@@ -161,7 +161,7 @@ func parseTree(body []byte) (*node, error) {
 			}
 			if len(stack) == 0 {
 				if root != nil {
-					return nil, errors.New("più di un elemento radice")
+					return nil, errors.New("more than one root element")
 				}
 				root = n
 			} else {
@@ -178,7 +178,7 @@ func parseTree(body []byte) (*node, error) {
 		}
 	}
 	if root == nil {
-		return nil, errors.New("documento vuoto")
+		return nil, errors.New("empty document")
 	}
 	return root, nil
 }
@@ -198,31 +198,31 @@ func unixTime(sec, usec int64) time.Time {
 	return time.Unix(sec, usec*1000).UTC()
 }
 
-// ParseReport interpreta il payload XML inviato da Monit.
+// ParseReport parses the XML payload sent by Monit.
 func ParseReport(body []byte) (*Report, error) {
 	root, err := parseTree(body)
 	if err != nil {
-		return nil, fmt.Errorf("xml non valido: %w", err)
+		return nil, fmt.Errorf("invalid xml: %w", err)
 	}
 	if root.name != "monit" {
-		return nil, fmt.Errorf("elemento radice inatteso <%s>", root.name)
+		return nil, fmt.Errorf("unexpected root element <%s>", root.name)
 	}
 	r := &Report{
 		MonitID: strings.TrimSpace(root.attrs["id"]),
 		Version: root.attrs["version"],
 	}
 	r.Incarnation, _ = strconv.ParseInt(root.attrs["incarnation"], 10, 64)
-	// Monit molto vecchi mettevano id/incarnation dentro <server>.
+	// Very old Monit versions put id/incarnation inside <server>.
 	if r.MonitID == "" {
 		r.MonitID = root.str("server", "id")
 		r.Incarnation = root.int("server", "incarnation")
 		r.Version = root.str("server", "version")
 	}
 	if r.MonitID == "" {
-		return nil, errors.New("monit id mancante")
+		return nil, errors.New("missing monit id")
 	}
 	if len(r.MonitID) > 64 {
-		return nil, errors.New("monit id troppo lungo")
+		return nil, errors.New("monit id too long")
 	}
 
 	srv := root.child("server")
@@ -236,8 +236,8 @@ func ParseReport(body []byte) (*Report, error) {
 		HttpdPort:     srv.int("httpd", "port"),
 		HttpdSSL:      srv.int("httpd", "ssl") == 1,
 	}
-	// Nota: <server><credentials> (utente/password dell'httpd di Monit) viene
-	// ignorato di proposito: non lo salviamo.
+	// Note: <server><credentials> (user/password of Monit's httpd) is
+	// deliberately ignored: we never store it.
 
 	pl := root.child("platform")
 	r.Platform = Platform{
@@ -261,7 +261,7 @@ func ParseReport(body []byte) (*Report, error) {
 			OnReboot:      s.int("onreboot"),
 			PendingAction: s.int("pendingaction"),
 		}
-		if svc.Name == "" { // formato pre-5.x: <name> come figlio
+		if svc.Name == "" { // pre-5.x format: <name> as a child element
 			svc.Name = s.str("name")
 		}
 		if t := s.str("type"); t != "" {
@@ -283,7 +283,7 @@ func ParseReport(body []byte) (*Report, error) {
 	for _, g := range root.get("servicegroups").childrenNamed("servicegroup") {
 		name := strings.TrimSpace(g.attrs["name"])
 		if name == "" {
-			name = g.str("name") // per sicurezza, se in qualche versione fosse un figlio
+			name = g.str("name") // just in case some version sends it as a child element
 		}
 		if name == "" {
 			continue
@@ -325,8 +325,8 @@ func (n *node) childrenNamed(name string) []*node {
 	return out
 }
 
-// childrenToValues converte i figli in una mappa; elementi ripetuti
-// (es. più <port> o <icmp> in un check host) diventano un array.
+// childrenToValues turns child elements into a map; repeated elements
+// (e.g. several <port> or <icmp> in a host check) become an array.
 func childrenToValues(children []*node, skip map[string]bool) map[string]any {
 	count := map[string]int{}
 	for _, c := range children {
@@ -357,7 +357,7 @@ func nodeValue(n *node) any {
 		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
 			return i
 		}
-		// niente NaN/Inf: non sono serializzabili in JSON
+		// no NaN/Inf: they cannot be serialized to JSON
 		if f, err := strconv.ParseFloat(s, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
 			return f
 		}
@@ -366,7 +366,7 @@ func nodeValue(n *node) any {
 	return childrenToValues(n.children, nil)
 }
 
-// FailedCount conta i servizi monitorati che sono in errore.
+// FailedCount returns the number of services that are failing.
 func (r *Report) FailedCount() int {
 	n := 0
 	for _, s := range r.Services {

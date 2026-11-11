@@ -46,7 +46,7 @@ func TestParseStatus(t *testing.T) {
 		t.Fatalf("load avg01: %#v", load["avg01"])
 	}
 	if by["root"].Data["mode"] != "755" {
-		t.Fatalf("mode deve restare stringa: %#v", by["root"].Data["mode"])
+		t.Fatalf("mode must stay a string: %#v", by["root"].Data["mode"])
 	}
 	if by["local"].Status != 32 { // Event_Connection
 		t.Fatalf("host check: %+v", by["local"])
@@ -69,31 +69,31 @@ func TestParseEvent(t *testing.T) {
 		t.Fatalf("event: %+v", e)
 	}
 	if len(r.Services) == 0 {
-		t.Fatal("anche i report con evento contengono lo status completo")
+		t.Fatal("reports carrying an event must also contain the full status")
 	}
 }
 
 func TestLatin1AndRepeated(t *testing.T) {
-	// byte 0xE0 = 'à' in ISO-8859-1, non UTF-8 valido; due <port> ripetuti.
+	// byte 0xE9 = 'é' in ISO-8859-1, not valid UTF-8; two repeated <port> elements.
 	body := []byte("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><monit id=\"abc\" incarnation=\"1\" version=\"5.0\">" +
-		"<server><localhostname>citt\xe0</localhostname></server><services>" +
+		"<server><localhostname>caf\xe9</localhostname></server><services>" +
 		"<service name=\"web\"><type>4</type><port><portnumber>80</portnumber></port><port><portnumber>443</portnumber></port></service>" +
 		"</services></monit>")
 	r, err := ParseReport(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Server.LocalHostname != "città" {
+	if r.Server.LocalHostname != "café" {
 		t.Fatalf("latin1: %q", r.Server.LocalHostname)
 	}
 	ports, ok := r.Services[0].Data["port"].([]any)
 	if !ok || len(ports) != 2 {
-		t.Fatalf("port ripetuti: %#v", r.Services[0].Data["port"])
+		t.Fatalf("repeated port: %#v", r.Services[0].Data["port"])
 	}
 }
 
 func TestOldFormat(t *testing.T) {
-	// Monit vecchi: <service type="3"><name>..</name>
+	// old Monit: <service type="3"><name>..</name>
 	body := []byte(`<?xml version="1.0" encoding="ISO-8859-1"?><monit><server><id>old1</id><incarnation>5</incarnation><version>5.2</version><localhostname>h</localhostname></server>` +
 		`<services><service type="3"><name>nginx</name><status>0</status></service></services></monit>`)
 	r, err := ParseReport(body)
@@ -108,7 +108,7 @@ func TestOldFormat(t *testing.T) {
 func TestRejectGarbage(t *testing.T) {
 	for _, b := range []string{"", "not xml", "<foo/>", `<monit></monit>`} {
 		if _, err := ParseReport([]byte(b)); err == nil {
-			t.Fatalf("atteso errore per %q", b)
+			t.Fatalf("expected an error for %q", b)
 		}
 	}
 }
@@ -123,6 +123,6 @@ func TestParseGroups(t *testing.T) {
 		t.Fatalf("web: %#v", r.Groups)
 	}
 	if len(load(t, "status.xml").Groups) != 0 {
-		t.Fatal("senza gruppi la mappa deve essere vuota")
+		t.Fatal("without groups the map must be empty")
 	}
 }

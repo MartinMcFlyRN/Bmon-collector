@@ -1,13 +1,13 @@
--- Schema del collector. Viene applicato all'avvio (solo CREATE ... IF NOT EXISTS).
--- Tutti i DATETIME sono in UTC.
+-- Collector schema. Applied at startup (CREATE ... IF NOT EXISTS only).
+-- All DATETIME values are UTC.
 
 CREATE TABLE IF NOT EXISTS hosts (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  monit_id        VARCHAR(64)  NOT NULL,          -- contenuto di ~/.monit.id
+  monit_id        VARCHAR(64)  NOT NULL,          -- content of ~/.monit.id
   hostname        VARCHAR(255) NOT NULL,
-  incarnation     BIGINT       NOT NULL,          -- timestamp di avvio del daemon Monit
+  incarnation     BIGINT       NOT NULL,          -- start timestamp of the Monit daemon
   monit_version   VARCHAR(32)  NOT NULL,
-  poll_interval   INT          NOT NULL,          -- secondi
+  poll_interval   INT          NOT NULL,          -- seconds
   monit_uptime    BIGINT       NOT NULL,
   control_file    VARCHAR(512) NOT NULL DEFAULT '',
   os_name         VARCHAR(64)  NOT NULL DEFAULT '',
@@ -25,39 +25,39 @@ CREATE TABLE IF NOT EXISTS hosts (
   services_failed INT          NOT NULL DEFAULT 0,
   first_seen      DATETIME(3)  NOT NULL,
   last_seen       DATETIME(3)  NOT NULL,
-  offline_since   DATETIME(3)  NULL DEFAULT NULL, -- valorizzato quando l'host smette di inviare report
+  offline_since   DATETIME(3)  NULL DEFAULT NULL, -- set when the host stops sending reports
   UNIQUE KEY uk_monit_id (monit_id),
   KEY idx_hostname (hostname),
   KEY idx_last_seen (last_seen)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Stato corrente: una riga per (host, servizio), aggiornata a ogni report.
+-- Current state: one row per (host, service), updated on every report.
 CREATE TABLE IF NOT EXISTS services (
   id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   host_id           BIGINT UNSIGNED NOT NULL,
   name              VARCHAR(255) NOT NULL,
   type              TINYINT UNSIGNED NOT NULL,     -- 0 fs,1 dir,2 file,3 process,4 host,5 system,6 fifo,7 program,8 net
-  status            BIGINT UNSIGNED NOT NULL,      -- bitmask eventi in errore, 0 = OK
+  status            BIGINT UNSIGNED NOT NULL,      -- bitmask of failing events, 0 = OK
   status_hint       BIGINT UNSIGNED NOT NULL,
-  monitor           TINYINT UNSIGNED NOT NULL,     -- 0 no, 1 sì, 2 init
+  monitor           TINYINT UNSIGNED NOT NULL,     -- 0 no, 1 yes, 2 init
   monitor_mode      TINYINT UNSIGNED NOT NULL,
   pending_action    TINYINT UNSIGNED NOT NULL,
   collected_at      DATETIME(6) NOT NULL,
-  status_changed_at DATETIME(3) NOT NULL,          -- ultimo cambio di status (per "in errore da X minuti")
-  data              JSON NOT NULL,                 -- metriche/campi specifici del tipo
+  status_changed_at DATETIME(3) NOT NULL,          -- last status change (for "failing for X minutes")
+  data              JSON NOT NULL,                 -- type-specific metrics/fields
   updated_at        DATETIME(3) NOT NULL,
   UNIQUE KEY uk_host_service (host_id, name),
   KEY idx_status (status),
   CONSTRAINT fk_services_host FOREIGN KEY (host_id) REFERENCES hosts (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Storico eventi. La unique key rende idempotenti i reinvii dalla eventqueue di Monit.
+-- Event history. The unique key makes resends from Monit's eventqueue idempotent.
 CREATE TABLE IF NOT EXISTS events (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   host_id      BIGINT UNSIGNED NOT NULL,
   service      VARCHAR(255) NOT NULL,
   service_type TINYINT UNSIGNED NOT NULL,
-  event_id     BIGINT UNSIGNED NOT NULL,           -- tipo evento Monit (0x200 NonExist, 0x20 Connection, ...)
+  event_id     BIGINT UNSIGNED NOT NULL,           -- Monit event type (0x200 NonExist, 0x20 Connection, ...)
   state        TINYINT UNSIGNED NOT NULL,          -- 0 succeeded, 1 failed, 2 changed, 3 changed not, 4 init
   action       TINYINT UNSIGNED NOT NULL,
   message      TEXT NOT NULL,
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS events (
   CONSTRAINT fk_events_host FOREIGN KEY (host_id) REFERENCES hosts (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Gruppi dei servizi (direttiva "group" del monitrc). Riscritti a ogni report.
+-- Service groups ("group" statement in monitrc). Rewritten on every report.
 CREATE TABLE IF NOT EXISTS service_groups (
   host_id    BIGINT UNSIGNED NOT NULL,
   group_name VARCHAR(255) NOT NULL,

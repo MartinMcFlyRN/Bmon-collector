@@ -1,5 +1,5 @@
 [Unit]
-Description=Bmon collector (sostituto di M/Monit)
+Description=Bmon collector (M/Monit replacement)
 After=network-online.target mariadb.service mysql.service
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=bmon-collector
 Group=bmon-collector
-# BMON_DSN, BMON_AUTH, BMON_LISTEN... (file 0600, contiene password)
+# BMON_DSN, BMON_AUTH, BMON_LISTEN... (mode 0600, contains passwords)
 EnvironmentFile=/etc/bmon-collector/env
 ExecStart=/usr/local/bin/bmon-collector
 Restart=always

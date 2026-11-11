@@ -33,7 +33,7 @@ func OpenStore(ctx context.Context, dsn string, maxConns int, log *slog.Logger) 
 	db.SetConnMaxLifetime(30 * time.Minute)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("connessione al database: %w", err)
+		return nil, fmt.Errorf("database connection: %w", err)
 	}
 	return &Store{db: db, log: log}, nil
 }
@@ -47,12 +47,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 			continue
 		}
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrazione: %w\n%s", err, stmt)
+			return fmt.Errorf("migration: %w\n%s", err, stmt)
 		}
 	}
-	// Colonne aggiunte dopo la 0.1.0 su database già esistenti.
+	// Columns added after 0.1.0, for databases that already exist.
 	if err := s.ensureColumn(ctx, "hosts", "offline_since", "DATETIME(3) NULL DEFAULT NULL AFTER last_seen"); err != nil {
-		return fmt.Errorf("migrazione hosts.offline_since: %w", err)
+		return fmt.Errorf("migration hosts.offline_since: %w", err)
 	}
 	return nil
 }
@@ -69,8 +69,8 @@ func stripComments(stmt string) string {
 	return strings.TrimSpace(b.String())
 }
 
-// trunc taglia una stringa a n caratteri senza spezzare UTF-8, per non far
-// fallire l'INSERT in strict mode su valori anomali.
+// trunc cuts a string to n characters without breaking UTF-8, so that an
+// INSERT does not fail in strict mode on unusual values.
 func trunc(s string, n int) string {
 	if utf8.RuneCountInString(s) <= n {
 		return s
@@ -86,8 +86,8 @@ func nz(t time.Time, fallback time.Time) time.Time {
 	return t
 }
 
-// SaveReport salva un report in un'unica transazione: host, stato corrente
-// dei servizi (upsert + rimozione di quelli spariti dal monitrc) ed eventi.
+// SaveReport stores a report in a single transaction: host, current state
+// of the services (upsert + removal of those dropped from monitrc) and events.
 func (s *Store) SaveReport(ctx context.Context, r *Report, remoteAddr string) error {
 	var err error
 	for attempt := 1; attempt <= 4; attempt++ {
@@ -95,14 +95,14 @@ func (s *Store) SaveReport(ctx context.Context, r *Report, remoteAddr string) er
 		if err == nil || !retryable(err) || ctx.Err() != nil {
 			return err
 		}
-		s.log.Debug("conflitto sul database, ritento", "host", r.Server.LocalHostname, "tentativo", attempt, "err", err)
+		s.log.Debug("database conflict, retrying", "host", r.Server.LocalHostname, "attempt", attempt, "err", err)
 		time.Sleep(time.Duration(attempt*attempt) * 20 * time.Millisecond)
 	}
 	return err
 }
 
-// retryable: deadlock, lock wait timeout, o due registrazioni concorrenti
-// dello stesso monit_id (duplicate key sull'INSERT dell'host).
+// retryable: deadlock, lock wait timeout, or two concurrent registrations
+// of the same monit_id (duplicate key on the host INSERT).
 func retryable(err error) bool {
 	var me *mysql.MySQLError
 	if errors.As(err, &me) {
@@ -115,12 +115,12 @@ func retryable(err error) bool {
 }
 
 func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) error {
-	// Precisione al millisecondo: deve coincidere con DATETIME(3), perché
-	// usiamo updated_at per riconoscere i servizi non più presenti.
+	// Millisecond precision: it must match DATETIME(3), because updated_at is
+	// used to detect services that are no longer reported.
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
-	// READ COMMITTED: niente gap lock, che con REPEATABLE READ mandano in
-	// deadlock le registrazioni concorrenti di host nuovi.
+	// READ COMMITTED: no gap locks, which under REPEATABLE READ deadlock
+	// concurrent registrations of new hosts.
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
@@ -132,20 +132,20 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 		return fmt.Errorf("host: %w", err)
 	}
 	if offlineSince != nil {
-		msg := fmt.Sprintf("Monit ha ripreso a inviare report dopo %s di silenzio", fmtDur(now.Sub(*offlineSince)))
+		msg := fmt.Sprintf("Monit resumed sending reports after %s of silence", fmtDur(now.Sub(*offlineSince)))
 		if err := insertBmonEvent(ctx, tx, hostID, StateSucceeded, msg, now); err != nil {
-			return fmt.Errorf("evento online: %w", err)
+			return fmt.Errorf("online event: %w", err)
 		}
 	}
 	if err := s.upsertServices(ctx, tx, hostID, r.Services, now); err != nil {
-		return fmt.Errorf("servizi: %w", err)
+		return fmt.Errorf("services: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM services WHERE host_id = ? AND updated_at <> ?`, hostID, now); err != nil {
-		return fmt.Errorf("pulizia servizi: %w", err)
+		return fmt.Errorf("services cleanup: %w", err)
 	}
 	if err := s.replaceGroups(ctx, tx, hostID, r.Groups); err != nil {
-		return fmt.Errorf("gruppi: %w", err)
+		return fmt.Errorf("groups: %w", err)
 	}
 	for _, e := range r.Events {
 		if _, err := tx.ExecContext(ctx, `
@@ -154,21 +154,21 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			hostID, trunc(e.Service, 255), e.ServiceType, e.ID, e.State, e.Action,
 			e.Message, nz(e.CollectedAt, now), now); err != nil {
-			return fmt.Errorf("evento: %w", err)
+			return fmt.Errorf("event: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	if offlineSince != nil {
-		s.log.Info("host di nuovo online", "host", r.Server.LocalHostname, "remote", remoteAddr,
-			"offline_da", offlineSince.Format(time.RFC3339), "durata", fmtDur(now.Sub(*offlineSince)))
+		s.log.Info("host back online", "host", r.Server.LocalHostname, "remote", remoteAddr,
+			"offline_since", offlineSince.Format(time.RFC3339), "duration", fmtDur(now.Sub(*offlineSince)))
 	}
 	return nil
 }
 
-// upsertHost restituisce anche offline_since se l'host era segnato offline
-// (e con questo report torna online).
+// upsertHost also returns offline_since if the host was marked offline
+// (and is now back online with this report).
 func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAddr string, now time.Time) (uint64, *time.Time, error) {
 	var (
 		id       uint64
@@ -208,19 +208,19 @@ func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAdd
 			return 0, nil, err
 		}
 		lid, _ := res.LastInsertId()
-		s.log.Info("nuovo host registrato", "host", hostname, "monit_id", r.MonitID, "remote", remoteAddr)
+		s.log.Info("new host registered", "host", hostname, "monit_id", r.MonitID, "remote", remoteAddr)
 		return uint64(lid), nil, nil
 	}
 
-	// Stesso monit_id ma hostname diverso: quasi sempre una VM clonata con lo
-	// stesso ~/.monit.id. Due host che si "rubano" la stessa riga.
+	// Same monit_id but a different hostname: almost always a cloned VM with
+	// the same ~/.monit.id, so two hosts keep "stealing" the same row.
 	if prevName != hostname {
-		s.log.Warn("hostname cambiato per lo stesso monit_id (VM clonata? rigenerare .monit.id con 'monit -r')",
-			"monit_id", r.MonitID, "prima", prevName, "ora", hostname,
-			"remote_prima", prevAddr, "remote_ora", remoteAddr)
+		s.log.Warn("hostname changed for the same monit_id (cloned VM? regenerate .monit.id with 'monit -r')",
+			"monit_id", r.MonitID, "before", prevName, "now", hostname,
+			"remote_before", prevAddr, "remote_now", remoteAddr)
 	}
 	if prevInc != r.Incarnation {
-		s.log.Info("monit riavviato", "host", hostname, "incarnation", r.Incarnation)
+		s.log.Info("monit restarted", "host", hostname, "incarnation", r.Incarnation)
 	}
 
 	_, err = tx.ExecContext(ctx, `
@@ -240,7 +240,7 @@ func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAdd
 	return id, nil, nil
 }
 
-// Eventi generati da Bmon stesso (non da Monit): service = "Monit", event_id = 0.
+// Events generated by Bmon itself (not by Monit): service = "Monit", event_id = 0.
 const (
 	BmonEventService = "Monit"
 	BmonEventID      = 0
@@ -266,7 +266,7 @@ func fmtDur(d time.Duration) string {
 	}
 	h, m := int(d.Hours()), int(d.Minutes())%60
 	if h >= 24 {
-		return fmt.Sprintf("%dg %dh %dm", h/24, h%24, m)
+		return fmt.Sprintf("%dd %dh %dm", h/24, h%24, m)
 	}
 	if h > 0 {
 		return fmt.Sprintf("%dh %dm", h, m)
@@ -274,10 +274,10 @@ func fmtDur(d time.Duration) string {
 	return fmt.Sprintf("%dm %ds", m, int(d.Seconds())%60)
 }
 
-// OfflinePolicy: un host è offline se non manda report da più di
-// max(MinSilence, Cycles × poll_interval). Prima che il collector sia attivo
-// da altrettanto tempo non si segnala niente (dopo un riavvio del collector
-// tutti gli host risulterebbero "vecchi").
+// OfflinePolicy: a host is offline when it has not sent a report for more
+// than max(MinSilence, Cycles × poll_interval). Nothing is reported until the
+// collector itself has been running that long (after a collector restart
+// every host would otherwise look stale).
 type OfflinePolicy struct {
 	Cycles     int
 	MinSilence time.Duration
@@ -292,8 +292,8 @@ func (p OfflinePolicy) threshold(poll int64) time.Duration {
 	return t
 }
 
-// CheckOffline segna offline gli host silenziosi e restituisce quanti ne ha
-// segnati in questo giro.
+// CheckOffline marks silent hosts as offline and returns how many were
+// marked in this round.
 func (s *Store) CheckOffline(ctx context.Context, p OfflinePolicy) (int, error) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	rows, err := s.db.QueryContext(ctx, `
@@ -333,8 +333,8 @@ func (s *Store) CheckOffline(ctx context.Context, p OfflinePolicy) (int, error) 
 		if now.Sub(ref) < thr {
 			continue
 		}
-		// La condizione su last_seen evita di segnare offline un host il cui
-		// report è arrivato tra la SELECT e questo UPDATE.
+		// The last_seen condition avoids marking a host offline when its report
+		// arrived between the SELECT and this UPDATE.
 		res, err := s.db.ExecContext(ctx,
 			`UPDATE hosts SET offline_since = ? WHERE id = ? AND offline_since IS NULL AND last_seen = ?`,
 			c.lastSeen, c.id, c.lastSeen)
@@ -345,14 +345,14 @@ func (s *Store) CheckOffline(ctx context.Context, p OfflinePolicy) (int, error) 
 			continue
 		}
 		silence := now.Sub(c.lastSeen)
-		msg := fmt.Sprintf("Nessun report da Monit da %s (ultimo report %s UTC, soglia %s)",
+		msg := fmt.Sprintf("No report from Monit for %s (last report %s UTC, threshold %s)",
 			fmtDur(silence), c.lastSeen.Format("2006-01-02 15:04:05"), fmtDur(thr))
 		if err := insertBmonEvent(ctx, s.db, c.id, StateFailed, msg, now); err != nil {
 			return marked, err
 		}
 		marked++
-		s.log.Warn("host offline: nessun report da Monit", "host", c.name, "remote", c.addr,
-			"ultimo_report", c.lastSeen.Format(time.RFC3339), "silenzio", fmtDur(silence), "soglia", fmtDur(thr))
+		s.log.Warn("host offline: no report from Monit", "host", c.name, "remote", c.addr,
+			"last_report", c.lastSeen.Format(time.RFC3339), "silence", fmtDur(silence), "threshold", fmtDur(thr))
 	}
 	return marked, nil
 }
@@ -363,7 +363,7 @@ func (s *Store) CountOffline(ctx context.Context) (total, offline int, err error
 	return
 }
 
-// ensureColumn aggiunge una colonna se manca (MySQL non ha ADD COLUMN IF NOT EXISTS).
+// ensureColumn adds a column if it is missing (MySQL has no ADD COLUMN IF NOT EXISTS).
 func (s *Store) ensureColumn(ctx context.Context, table, column, def string) error {
 	var n int
 	if err := s.db.QueryRowContext(ctx, `
@@ -375,13 +375,13 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, def string) err
 	if n > 0 {
 		return nil
 	}
-	s.log.Info("aggiornamento schema", "tabella", table, "colonna", column)
+	s.log.Info("schema upgrade", "table", table, "column", column)
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN `%s` %s", table, column, def))
 	return err
 }
 
-// replaceGroups riscrive i gruppi dell'host. Sono poche righe per host,
-// quindi delete+insert è più semplice (e altrettanto economico) di un diff.
+// replaceGroups rewrites the host's groups. There are few rows per host,
+// so delete+insert is simpler (and just as cheap) as computing a diff.
 func (s *Store) replaceGroups(ctx context.Context, tx *sql.Tx, hostID uint64, groups map[string][]string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM service_groups WHERE host_id = ?`, hostID); err != nil {
 		return err
@@ -425,13 +425,13 @@ func (s *Store) upsertServices(ctx context.Context, tx *sql.Tx, hostID uint64, s
 			q.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?)")
 			data, err := json.Marshal(sv.Data)
 			if err != nil {
-				return fmt.Errorf("serializzazione %q: %w", sv.Name, err)
+				return fmt.Errorf("serializing %q: %w", sv.Name, err)
 			}
 			args = append(args, hostID, trunc(sv.Name, 255), sv.Type, sv.Status, sv.StatusHint,
 				sv.Monitor, sv.MonitorMode, sv.PendingAction, nz(sv.CollectedAt, now), now,
 				string(data), now)
 		}
-		// L'ordine conta: status_changed_at va valutato PRIMA di aggiornare status.
+		// Order matters: status_changed_at must be evaluated BEFORE status is updated.
 		q.WriteString(` ON DUPLICATE KEY UPDATE
 			status_changed_at = IF(status <> VALUES(status), VALUES(status_changed_at), status_changed_at),
 			type = VALUES(type), status = VALUES(status), status_hint = VALUES(status_hint),
@@ -445,8 +445,8 @@ func (s *Store) upsertServices(ctx context.Context, tx *sql.Tx, hostID uint64, s
 	return nil
 }
 
-// PurgeEvents cancella gli eventi più vecchi di retention, a blocchi per non
-// tenere lock lunghi.
+// PurgeEvents deletes events older than retention, in batches to avoid
+// holding long locks.
 func (s *Store) PurgeEvents(ctx context.Context, retention time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-retention)
 	var total int64
