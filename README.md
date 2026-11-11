@@ -1,6 +1,6 @@
 # Bmon collector
 
-Version **0.4.0**. First component of Bmon, a replacement for M/Monit: it
+Version **0.5.0**. First component of Bmon, a replacement for M/Monit: it
 receives the reports that Monit agents send with `set mmonit` and stores them
 in MySQL/MariaDB.
 
@@ -19,7 +19,7 @@ What it does:
 - logs a warning for cloned VMs sharing the same `.monit.id` (same id, changing hostname)
 - exposes `/healthz` (database ping and counters)
 
-It never stores the Monit httpd credentials that agents include in the payload.
+- stores the **Monit httpd credentials** sent in the reports (optionally encrypted), so that [Bmon-web](https://github.com/MartinMcFlyRN/Bmon-web) can send start/stop/restart/monitor/unmonitor to the agents, like M/Monit
 
 Tested with a real Monit 5.33 + MariaDB 10.11. With 500 simulated hosts of 30
 services each: about 365 reports/s on 2 vCPUs, zero errors. 500 hosts with a
@@ -81,6 +81,8 @@ Configuration (environment variables or flags, see `bmon-collector -h`):
 | `BMON_AUTH` | `-auth` | required | `user:pass[,user2:pass2]` |
 | `BMON_TRUSTED_PROXIES` | `-trusted-proxies` | `127.0.0.1/32,::1/128` | proxies allowed to set `X-Real-IP` |
 | `BMON_LOG_LEVEL` | `-log-level` | `info` | `debug` logs every report |
+| `BMON_STORE_CREDENTIALS` | `-store-credentials` | `true` | store the Monit httpd credentials found in the reports |
+| `BMON_CREDENTIALS_KEY` | `-credentials-key` | empty | base64 32-byte key: stored passwords are encrypted (AES-256-GCM). Empty = stored in clear |
 | `BMON_OFFLINE_CYCLES` | `-offline-cycles` | `3` | poll cycles without a report before a host is offline |
 | `BMON_OFFLINE_MIN` | `-offline-min` | `3m` | minimum silence, regardless of the poll interval |
 | | `-offline-check-every` | `30s` | how often silent hosts are checked |
@@ -97,13 +99,43 @@ credential pairs.
 
 ```
 set mmonit https://monit:PASSWORD@collector.example.com/collector
-    and register without credentials
 ```
 
-`and register without credentials` stops Monit from sending its httpd
-credentials with every report. The collector does not use them, so it is better
-if they never travel. Publish the collector **over HTTPS only**, since Basic Auth
-is sent in clear text.
+Publish the collector **over HTTPS only**: Basic Auth and the httpd
+credentials below travel in every report.
+
+### Service actions from Bmon-web
+
+Like M/Monit, Bmon-web sends actions (start, stop, restart, monitor, unmonitor)
+to the httpd of each Monit agent, with the user and password that Monit puts in
+its reports. For that, on each host:
+
+- `set mmonit` **without** `and register without credentials` (otherwise
+  Monit sends no credentials and actions are not available for that host);
+- `set httpd` must listen on an address reachable from the Bmon-web server and
+  allow it, for example:
+
+  ```
+  set httpd port 2812 and
+      use address 0.0.0.0           # or the host's LAN/public address
+      allow 203.0.113.5             # address of the Bmon-web server
+      allow admin:LONG-PASSWORD     # these are the credentials Bmon-web will use
+  ```
+
+  When httpd listens on `0.0.0.0` or on loopback, Bmon-web connects to the
+  address the reports come from. Hosts behind NAT, or on LANs the Bmon-web
+  server cannot reach, cannot receive actions (same limit as M/Monit).
+
+Encrypt the stored passwords with a key, and give the same key to Bmon-web
+(`monit.credentials_key`):
+
+```sh
+openssl rand -base64 32        # → BMON_CREDENTIALS_KEY in /etc/bmon-collector/env
+```
+
+Passwords are rewritten (and re-encrypted) at every report, so setting or
+changing the key takes effect within one poll cycle. To keep the pre-0.5.0
+behaviour and never store them: `BMON_STORE_CREDENTIALS=false`.
 
 Also recommended: `set eventqueue basedir /var/lib/monit/events slots 1000`.
 If the collector is unreachable, events are queued and resent, with no duplicates.
@@ -191,6 +223,6 @@ events (e.g. 0x20 connection, 0x200 non exist); 0 means OK.
   has to be decided before building the UI.
 - **Notifications**: email/chat alerts for offline hosts and Monit events.
 - **UI / read API**.
-- **Actions** (start/stop/restart): M/Monit performs them by calling Monit's
-  httpd, which is impossible for hosts on unreachable LANs. Another mechanism
-  will be needed.
+- **Actions for unreachable hosts**: actions go through Monit's httpd (0.5.0
+  stores the credentials for Bmon-web), which is impossible for hosts on LANs
+  the web server cannot reach. Another mechanism will be needed for them.

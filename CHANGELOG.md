@@ -4,6 +4,24 @@ This project follows [Semantic Versioning](https://semver.org/).
 Until 1.0, the database schema and configuration may change between minor
 versions; the notes always say what to do.
 
+## [0.5.0] - 2026-11-12
+
+- Added: the Monit httpd credentials included in the reports (`<server><credentials>`)
+  are stored in the new columns `hosts.httpd_username` and `hosts.httpd_password`,
+  so that Bmon-web can send service actions to the agents, like M/Monit.
+- Added: `BMON_CREDENTIALS_KEY` / `-credentials-key` (base64, 32 bytes) encrypts the
+  stored passwords with AES-256-GCM, bound to the host's `monit_id`. Without a key they
+  are stored in clear (a warning is logged at startup).
+- Added: `BMON_STORE_CREDENTIALS=false` / `-store-credentials=false` keeps the previous
+  behaviour (credentials never stored).
+- Changed: the documentation no longer recommends `and register without credentials`;
+  it is still supported, but hosts configured that way cannot receive actions.
+
+Upgrade: replace the binary and restart; the two columns are added automatically.
+Set `BMON_CREDENTIALS_KEY` (`openssl rand -base64 32`) in `/etc/bmon-collector/env`
+before restarting, and put the same value in the Bmon-web configuration.
+On the hosts, remove `and register without credentials` where you want actions.
+
 ## [0.4.0] - 2026-11-11
 
 - Changed: the whole project is now in English — log messages and log keys,

@@ -28,7 +28,7 @@ import (
 // time with -ldflags "-X main.Version=0.1.0-dev+abc123".
 const Name = "Bmon collector"
 
-var Version = "0.4.0"
+var Version = "0.5.0"
 
 type config struct {
 	listen         string
@@ -42,6 +42,8 @@ type config struct {
 	logLevel       string
 	offline        OfflinePolicy
 	offlineEvery   time.Duration
+	storeCreds     bool
+	credsKey       string
 }
 
 type credential struct{ user, pass string }
@@ -56,6 +58,16 @@ func env(key, def string) string {
 func envInt(key string, def int) int {
 	if v, err := strconv.Atoi(os.Getenv(key)); err == nil {
 		return v
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
 	}
 	return def
 }
@@ -85,6 +97,10 @@ func loadConfig() (*config, error) {
 	flag.DurationVar(&c.offline.MinSilence, "offline-min", envDur("BMON_OFFLINE_MIN", 3*time.Minute),
 		"minimum silence before a host is marked offline, regardless of its poll interval (env BMON_OFFLINE_MIN)")
 	flag.DurationVar(&c.offlineEvery, "offline-check-every", 30*time.Second, "how often to check for silent hosts")
+	flag.BoolVar(&c.storeCreds, "store-credentials", envBool("BMON_STORE_CREDENTIALS", true),
+		"store the Monit httpd credentials sent in the reports, so that Bmon-web can send actions (env BMON_STORE_CREDENTIALS)")
+	flag.StringVar(&c.credsKey, "credentials-key", env("BMON_CREDENTIALS_KEY", ""),
+		"base64 32-byte key to encrypt the stored credentials; empty = stored in clear (env BMON_CREDENTIALS_KEY)")
 	flag.StringVar(&c.logLevel, "log-level", env("BMON_LOG_LEVEL", "info"), "debug|info|warn|error")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
@@ -325,6 +341,21 @@ func main() {
 		os.Exit(1)
 	}
 	defer store.Close()
+
+	sealer, err := newCredentialSealer(cfg.credsKey)
+	if err != nil {
+		log.Error("startup failed", "err", err)
+		os.Exit(1)
+	}
+	store.SetCredentials(cfg.storeCreds, sealer)
+	switch {
+	case !cfg.storeCreds:
+		log.Info("Monit httpd credentials are not stored: Bmon-web cannot send actions")
+	case sealer.Encrypted():
+		log.Info("Monit httpd credentials are stored encrypted")
+	default:
+		log.Warn("Monit httpd credentials are stored in clear: set BMON_CREDENTIALS_KEY to encrypt them")
+	}
 
 	s := &server{cfg: cfg, store: store, log: log}
 	mux := http.NewServeMux()

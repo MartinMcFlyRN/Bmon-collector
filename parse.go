@@ -37,6 +37,10 @@ type Server struct {
 	HttpdAddress  string
 	HttpdPort     int64
 	HttpdSSL      bool
+	// Credentials of Monit's httpd, present unless monitrc says
+	// "register without credentials". Never logged.
+	HttpdUser     string
+	HttpdPassword string
 }
 
 type Platform struct {
@@ -235,9 +239,9 @@ func ParseReport(body []byte) (*Report, error) {
 		HttpdAddress:  srv.str("httpd", "address"),
 		HttpdPort:     srv.int("httpd", "port"),
 		HttpdSSL:      srv.int("httpd", "ssl") == 1,
+		HttpdUser:     srv.str("credentials", "username"),
+		HttpdPassword: srv.str("credentials", "password"),
 	}
-	// Note: <server><credentials> (user/password of Monit's httpd) is
-	// deliberately ignored: we never store it.
 
 	pl := root.child("platform")
 	r.Platform = Platform{

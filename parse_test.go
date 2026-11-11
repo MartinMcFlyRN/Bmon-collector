@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -124,5 +125,64 @@ func TestParseGroups(t *testing.T) {
 	}
 	if len(load(t, "status.xml").Groups) != 0 {
 		t.Fatal("without groups the map must be empty")
+	}
+}
+
+func TestParseCredentials(t *testing.T) {
+	b, err := os.ReadFile("testdata/status.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ParseReport(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Server.HttpdUser != "" || r.Server.HttpdPassword != "" {
+		t.Fatalf("no credentials expected: %+v", r.Server)
+	}
+	// Same report as sent without "register without credentials".
+	withCreds := strings.Replace(string(b), "</httpd>",
+		"</httpd><credentials><username>admin</username><password>s3cr&amp;t</password></credentials>", 1)
+	r, err = ParseReport([]byte(withCreds))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Server.HttpdUser != "admin" || r.Server.HttpdPassword != "s3cr&t" {
+		t.Fatalf("credentials: %q %q", r.Server.HttpdUser, r.Server.HttpdPassword)
+	}
+}
+
+func TestCredentialSealer(t *testing.T) {
+	plain, _ := newCredentialSealer("")
+	v, _ := plain.Seal("pw", "id1")
+	if v != "plain:pw" {
+		t.Fatalf("plain: %q", v)
+	}
+	if v, _ := plain.Seal("", "id1"); v != "" {
+		t.Fatalf("empty password must stay empty: %q", v)
+	}
+
+	key := "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" // "0123456789abcdef0123456789abcdef"
+	c, err := newCredentialSealer(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1, _ := c.Seal("pa:ss wörd", "id1")
+	v2, _ := c.Seal("pa:ss wörd", "id1")
+	if !strings.HasPrefix(v1, "aes256gcm:") || v1 == v2 {
+		t.Fatalf("expected random nonces: %q %q", v1, v2)
+	}
+	if got, err := c.Open(v1, "id1"); err != nil || got != "pa:ss wörd" {
+		t.Fatalf("open: %q %v", got, err)
+	}
+	if _, err := c.Open(v1, "id2"); err == nil {
+		t.Fatal("ciphertext must be bound to the monit_id")
+	}
+	other, _ := newCredentialSealer("ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=")
+	if _, err := other.Open(v1, "id1"); err == nil {
+		t.Fatal("wrong key must fail")
+	}
+	if _, err := newCredentialSealer("c2hvcnQ="); err == nil {
+		t.Fatal("short key must be rejected")
 	}
 }

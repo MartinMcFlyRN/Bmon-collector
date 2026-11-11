@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS hosts (
   httpd_address   VARCHAR(255) NOT NULL DEFAULT '',
   httpd_port      INT          NOT NULL DEFAULT 0,
   httpd_ssl       TINYINT(1)   NOT NULL DEFAULT 0,
+  httpd_username  VARCHAR(255) NOT NULL DEFAULT '', -- Monit httpd credentials (see credentials.go)
+  httpd_password  VARCHAR(1024) NOT NULL DEFAULT '',
   remote_addr     VARCHAR(45)  NOT NULL DEFAULT '',
   services_total  INT          NOT NULL DEFAULT 0,
   services_failed INT          NOT NULL DEFAULT 0,

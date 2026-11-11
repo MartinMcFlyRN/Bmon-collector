@@ -21,6 +21,17 @@ var schemaSQL string
 type Store struct {
 	db  *sql.DB
 	log *slog.Logger
+
+	// Monit httpd credentials: stored only if storeCreds is set, sealed by creds.
+	storeCreds bool
+	creds      *credentialSealer
+}
+
+// SetCredentials configures how the Monit httpd credentials found in the
+// reports are stored. With store=false they are discarded (pre-0.5.0 behaviour).
+func (s *Store) SetCredentials(store bool, sealer *credentialSealer) {
+	s.storeCreds = store
+	s.creds = sealer
 }
 
 func OpenStore(ctx context.Context, dsn string, maxConns int, log *slog.Logger) (*Store, error) {
@@ -53,6 +64,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 	// Columns added after 0.1.0, for databases that already exist.
 	if err := s.ensureColumn(ctx, "hosts", "offline_since", "DATETIME(3) NULL DEFAULT NULL AFTER last_seen"); err != nil {
 		return fmt.Errorf("migration hosts.offline_since: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "hosts", "httpd_username", "VARCHAR(255) NOT NULL DEFAULT '' AFTER httpd_ssl"); err != nil {
+		return fmt.Errorf("migration hosts.httpd_username: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "hosts", "httpd_password", "VARCHAR(1024) NOT NULL DEFAULT '' AFTER httpd_username"); err != nil {
+		return fmt.Errorf("migration hosts.httpd_password: %w", err)
 	}
 	return nil
 }
@@ -186,12 +203,23 @@ func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAdd
 	}
 
 	hostname := trunc(r.Server.LocalHostname, 255)
+
+	user, password := "", ""
+	if s.storeCreds && r.Server.HttpdPassword != "" {
+		sealed, err := s.creds.Seal(r.Server.HttpdPassword, r.MonitID)
+		if err != nil {
+			s.log.Warn("httpd credentials not stored", "host", hostname, "err", err)
+		} else {
+			user, password = trunc(r.Server.HttpdUser, 255), sealed
+		}
+	}
+
 	args := []any{
 		hostname, r.Incarnation, trunc(r.Version, 32), r.Server.Poll, r.Server.Uptime,
 		trunc(r.Server.ControlFile, 512),
 		trunc(r.Platform.Name, 64), trunc(r.Platform.Release, 128), trunc(r.Platform.Version, 255),
 		trunc(r.Platform.Machine, 32), r.Platform.CPU, r.Platform.MemoryKB, r.Platform.SwapKB,
-		trunc(r.Server.HttpdAddress, 255), r.Server.HttpdPort, r.Server.HttpdSSL,
+		trunc(r.Server.HttpdAddress, 255), r.Server.HttpdPort, r.Server.HttpdSSL, user, password,
 		trunc(remoteAddr, 45), len(r.Services), r.FailedCount(), now,
 	}
 
@@ -200,9 +228,10 @@ func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAdd
 			INSERT INTO hosts
 			  (hostname, incarnation, monit_version, poll_interval, monit_uptime, control_file,
 			   os_name, os_release, os_version, machine, cpu_count, memory_kb, swap_kb,
-			   httpd_address, httpd_port, httpd_ssl, remote_addr, services_total, services_failed,
+			   httpd_address, httpd_port, httpd_ssl, httpd_username, httpd_password,
+			   remote_addr, services_total, services_failed,
 			   last_seen, monit_id, first_seen)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			append(args, r.MonitID, now)...)
 		if err != nil {
 			return 0, nil, err
@@ -227,7 +256,8 @@ func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAdd
 		UPDATE hosts SET
 		  hostname=?, incarnation=?, monit_version=?, poll_interval=?, monit_uptime=?, control_file=?,
 		  os_name=?, os_release=?, os_version=?, machine=?, cpu_count=?, memory_kb=?, swap_kb=?,
-		  httpd_address=?, httpd_port=?, httpd_ssl=?, remote_addr=?, services_total=?, services_failed=?,
+		  httpd_address=?, httpd_port=?, httpd_ssl=?, httpd_username=?, httpd_password=?,
+		  remote_addr=?, services_total=?, services_failed=?,
 		  last_seen=?, offline_since=NULL
 		WHERE id=?`, append(args, id)...)
 	if err != nil {
