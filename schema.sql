@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS hosts (
   services_failed INT          NOT NULL DEFAULT 0,
   first_seen      DATETIME(3)  NOT NULL,
   last_seen       DATETIME(3)  NOT NULL,
+  offline_since   DATETIME(3)  NULL DEFAULT NULL, -- valorizzato quando l'host smette di inviare report
   UNIQUE KEY uk_monit_id (monit_id),
   KEY idx_hostname (hostname),
   KEY idx_last_seen (last_seen)

@@ -28,7 +28,7 @@ import (
 // build con -ldflags "-X main.Version=0.1.0-dev+abc123".
 const Name = "Bmon collector"
 
-var Version = "0.2.0"
+var Version = "0.3.0"
 
 type config struct {
 	listen         string
@@ -40,12 +40,28 @@ type config struct {
 	dbTimeout      time.Duration
 	eventRetention time.Duration
 	logLevel       string
+	offline        OfflinePolicy
+	offlineEvery   time.Duration
 }
 
 type credential struct{ user, pass string }
 
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(key)); err == nil {
+		return v
+	}
+	return def
+}
+
+func envDur(key string, def time.Duration) time.Duration {
+	if v, err := time.ParseDuration(os.Getenv(key)); err == nil {
 		return v
 	}
 	return def
@@ -64,9 +80,17 @@ func loadConfig() (*config, error) {
 	flag.IntVar(&c.maxConns, "db-conns", 20, "connessioni massime al database")
 	flag.DurationVar(&c.dbTimeout, "db-timeout", 10*time.Second, "timeout per il salvataggio di un report")
 	flag.IntVar(&retentionDays, "event-retention-days", 180, "giorni di storico eventi (0 = per sempre)")
+	flag.IntVar(&c.offline.Cycles, "offline-cycles", envInt("BMON_OFFLINE_CYCLES", 3),
+		"host offline dopo questo numero di cicli di poll senza report (env BMON_OFFLINE_CYCLES)")
+	flag.DurationVar(&c.offline.MinSilence, "offline-min", envDur("BMON_OFFLINE_MIN", 3*time.Minute),
+		"silenzio minimo prima di dichiarare un host offline, qualunque sia il poll (env BMON_OFFLINE_MIN)")
+	flag.DurationVar(&c.offlineEvery, "offline-check-every", 30*time.Second, "ogni quanto controllare gli host silenziosi")
 	flag.StringVar(&c.logLevel, "log-level", env("BMON_LOG_LEVEL", "info"), "debug|info|warn|error")
 	showVersion := flag.Bool("version", false, "stampa la versione ed esce")
 	flag.Parse()
+	if c.offline.Cycles < 1 {
+		c.offline.Cycles = 1
+	}
 	if *showVersion {
 		fmt.Printf("%s %s\n", Name, Version)
 		os.Exit(0)
@@ -234,8 +258,24 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
-	fmt.Fprintf(w, "ok\nversion %s\nreports %d\nevents %d\nrejected %d\nstorage_errors %d\n",
-		Version, s.stats.reports.Load(), s.stats.events.Load(), s.stats.rejected.Load(), s.stats.failed.Load())
+	total, offline, _ := s.store.CountOffline(ctx)
+	fmt.Fprintf(w, "ok\nversion %s\nhosts %d\nhosts_offline %d\nreports %d\nevents %d\nrejected %d\nstorage_errors %d\n",
+		Version, total, offline, s.stats.reports.Load(), s.stats.events.Load(), s.stats.rejected.Load(), s.stats.failed.Load())
+}
+
+func (s *server) offlineLoop(ctx context.Context) {
+	t := time.NewTicker(s.cfg.offlineEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if _, err := s.store.CheckOffline(ctx, s.cfg.offline); err != nil && ctx.Err() == nil {
+			s.log.Error("controllo host offline fallito", "err", err)
+		}
+	}
 }
 
 func (s *server) purgeLoop(ctx context.Context) {
@@ -299,7 +339,9 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       90 * time.Second,
 	}
+	cfg.offline.Started = time.Now().UTC()
 	go s.purgeLoop(ctx)
+	go s.offlineLoop(ctx)
 	go func() {
 		<-ctx.Done()
 		log.Info("arresto in corso")
@@ -309,7 +351,8 @@ func main() {
 	}()
 
 	log.Info(Name+" in ascolto", "versione", Version, "addr", cfg.listen, "credenziali", len(cfg.auth),
-		"retention_eventi_giorni", strconv.Itoa(int(cfg.eventRetention.Hours()/24)))
+		"retention_eventi_giorni", strconv.Itoa(int(cfg.eventRetention.Hours()/24)),
+		"offline_dopo_cicli", cfg.offline.Cycles, "offline_min", cfg.offline.MinSilence)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("server terminato", "err", err)
 		os.Exit(1)

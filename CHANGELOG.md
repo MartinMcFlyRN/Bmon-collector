@@ -4,6 +4,19 @@ Il progetto segue il [Semantic Versioning](https://semver.org/lang/it/).
 Fino alla 1.0 schema del database e configurazione possono cambiare tra
 versioni minori: le note indicano sempre cosa fare.
 
+## [0.3.0] - 2026-11-11
+
+- Nuovo: rilevamento host offline. Se un host non invia report da più di
+  `max(BMON_OFFLINE_MIN, BMON_OFFLINE_CYCLES × poll)` (default 3m / 3 cicli)
+  il collector lo logga come WARN, valorizza `hosts.offline_since` e registra
+  un evento (`service='Monit'`, `event_id=0`, `state=1`). Al ritorno logga
+  "host di nuovo online" con la durata e registra l'evento `state=0`.
+- Nessun falso allarme dopo un riavvio del collector.
+- `/healthz` riporta `hosts` e `hosts_offline`.
+
+Aggiornamento: sostituire il binario e riavviare. La colonna
+`hosts.offline_since` viene aggiunta in automatico all'avvio.
+
 ## [0.2.0] - 2026-11-11
 
 - Nuovo: i gruppi dei servizi (`group` nel monitrc) vengono salvati nella

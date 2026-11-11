@@ -50,6 +50,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("migrazione: %w\n%s", err, stmt)
 		}
 	}
+	// Colonne aggiunte dopo la 0.1.0 su database già esistenti.
+	if err := s.ensureColumn(ctx, "hosts", "offline_since", "DATETIME(3) NULL DEFAULT NULL AFTER last_seen"); err != nil {
+		return fmt.Errorf("migrazione hosts.offline_since: %w", err)
+	}
 	return nil
 }
 
@@ -123,9 +127,15 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 	}
 	defer tx.Rollback()
 
-	hostID, err := s.upsertHost(ctx, tx, r, remoteAddr, now)
+	hostID, offlineSince, err := s.upsertHost(ctx, tx, r, remoteAddr, now)
 	if err != nil {
 		return fmt.Errorf("host: %w", err)
+	}
+	if offlineSince != nil {
+		msg := fmt.Sprintf("Monit ha ripreso a inviare report dopo %s di silenzio", fmtDur(now.Sub(*offlineSince)))
+		if err := insertBmonEvent(ctx, tx, hostID, StateSucceeded, msg, now); err != nil {
+			return fmt.Errorf("evento online: %w", err)
+		}
 	}
 	if err := s.upsertServices(ctx, tx, hostID, r.Services, now); err != nil {
 		return fmt.Errorf("servizi: %w", err)
@@ -147,22 +157,32 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 			return fmt.Errorf("evento: %w", err)
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if offlineSince != nil {
+		s.log.Info("host di nuovo online", "host", r.Server.LocalHostname, "remote", remoteAddr,
+			"offline_da", offlineSince.Format(time.RFC3339), "durata", fmtDur(now.Sub(*offlineSince)))
+	}
+	return nil
 }
 
-func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAddr string, now time.Time) (uint64, error) {
+// upsertHost restituisce anche offline_since se l'host era segnato offline
+// (e con questo report torna online).
+func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAddr string, now time.Time) (uint64, *time.Time, error) {
 	var (
 		id       uint64
 		prevName string
 		prevInc  int64
 		prevAddr string
+		offline  sql.NullTime
 	)
 	err := tx.QueryRowContext(ctx,
-		`SELECT id, hostname, incarnation, remote_addr FROM hosts WHERE monit_id = ? FOR UPDATE`,
-		r.MonitID).Scan(&id, &prevName, &prevInc, &prevAddr)
+		`SELECT id, hostname, incarnation, remote_addr, offline_since FROM hosts WHERE monit_id = ? FOR UPDATE`,
+		r.MonitID).Scan(&id, &prevName, &prevInc, &prevAddr, &offline)
 	found := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, err
+		return 0, nil, err
 	}
 
 	hostname := trunc(r.Server.LocalHostname, 255)
@@ -185,11 +205,11 @@ func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAdd
 			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			append(args, r.MonitID, now)...)
 		if err != nil {
-			return 0, err
+			return 0, nil, err
 		}
 		lid, _ := res.LastInsertId()
 		s.log.Info("nuovo host registrato", "host", hostname, "monit_id", r.MonitID, "remote", remoteAddr)
-		return uint64(lid), nil
+		return uint64(lid), nil, nil
 	}
 
 	// Stesso monit_id ma hostname diverso: quasi sempre una VM clonata con lo
@@ -208,9 +228,156 @@ func (s *Store) upsertHost(ctx context.Context, tx *sql.Tx, r *Report, remoteAdd
 		  hostname=?, incarnation=?, monit_version=?, poll_interval=?, monit_uptime=?, control_file=?,
 		  os_name=?, os_release=?, os_version=?, machine=?, cpu_count=?, memory_kb=?, swap_kb=?,
 		  httpd_address=?, httpd_port=?, httpd_ssl=?, remote_addr=?, services_total=?, services_failed=?,
-		  last_seen=?
+		  last_seen=?, offline_since=NULL
 		WHERE id=?`, append(args, id)...)
-	return id, err
+	if err != nil {
+		return 0, nil, err
+	}
+	if offline.Valid {
+		t := offline.Time.UTC()
+		return id, &t, nil
+	}
+	return id, nil, nil
+}
+
+// Eventi generati da Bmon stesso (non da Monit): service = "Monit", event_id = 0.
+const (
+	BmonEventService = "Monit"
+	BmonEventID      = 0
+	StateSucceeded   = 0
+	StateFailed      = 1
+)
+
+func insertBmonEvent(ctx context.Context, ex interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, hostID uint64, state int, msg string, now time.Time) error {
+	_, err := ex.ExecContext(ctx, `
+		INSERT IGNORE INTO events
+		  (host_id, service, service_type, event_id, state, action, message, collected_at, received_at)
+		VALUES (?, ?, 5, ?, ?, 1, ?, ?, ?)`,
+		hostID, BmonEventService, BmonEventID, state, msg, now, now)
+	return err
+}
+
+func fmtDur(d time.Duration) string {
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return d.String()
+	}
+	h, m := int(d.Hours()), int(d.Minutes())%60
+	if h >= 24 {
+		return fmt.Sprintf("%dg %dh %dm", h/24, h%24, m)
+	}
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	return fmt.Sprintf("%dm %ds", m, int(d.Seconds())%60)
+}
+
+// OfflinePolicy: un host è offline se non manda report da più di
+// max(MinSilence, Cycles × poll_interval). Prima che il collector sia attivo
+// da altrettanto tempo non si segnala niente (dopo un riavvio del collector
+// tutti gli host risulterebbero "vecchi").
+type OfflinePolicy struct {
+	Cycles     int
+	MinSilence time.Duration
+	Started    time.Time
+}
+
+func (p OfflinePolicy) threshold(poll int64) time.Duration {
+	t := time.Duration(int64(p.Cycles)*poll) * time.Second
+	if t < p.MinSilence {
+		t = p.MinSilence
+	}
+	return t
+}
+
+// CheckOffline segna offline gli host silenziosi e restituisce quanti ne ha
+// segnati in questo giro.
+func (s *Store) CheckOffline(ctx context.Context, p OfflinePolicy) (int, error) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, hostname, remote_addr, poll_interval, last_seen
+		FROM hosts WHERE offline_since IS NULL AND last_seen < ?`, now.Add(-p.MinSilence))
+	if err != nil {
+		return 0, err
+	}
+	type cand struct {
+		id       uint64
+		name     string
+		addr     string
+		poll     int64
+		lastSeen time.Time
+	}
+	var cands []cand
+	for rows.Next() {
+		var c cand
+		if err := rows.Scan(&c.id, &c.name, &c.addr, &c.poll, &c.lastSeen); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		cands = append(cands, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	marked := 0
+	for _, c := range cands {
+		thr := p.threshold(c.poll)
+		ref := c.lastSeen
+		if p.Started.After(ref) {
+			ref = p.Started
+		}
+		if now.Sub(ref) < thr {
+			continue
+		}
+		// La condizione su last_seen evita di segnare offline un host il cui
+		// report è arrivato tra la SELECT e questo UPDATE.
+		res, err := s.db.ExecContext(ctx,
+			`UPDATE hosts SET offline_since = ? WHERE id = ? AND offline_since IS NULL AND last_seen = ?`,
+			c.lastSeen, c.id, c.lastSeen)
+		if err != nil {
+			return marked, err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue
+		}
+		silence := now.Sub(c.lastSeen)
+		msg := fmt.Sprintf("Nessun report da Monit da %s (ultimo report %s UTC, soglia %s)",
+			fmtDur(silence), c.lastSeen.Format("2006-01-02 15:04:05"), fmtDur(thr))
+		if err := insertBmonEvent(ctx, s.db, c.id, StateFailed, msg, now); err != nil {
+			return marked, err
+		}
+		marked++
+		s.log.Warn("host offline: nessun report da Monit", "host", c.name, "remote", c.addr,
+			"ultimo_report", c.lastSeen.Format(time.RFC3339), "silenzio", fmtDur(silence), "soglia", fmtDur(thr))
+	}
+	return marked, nil
+}
+
+func (s *Store) CountOffline(ctx context.Context) (total, offline int, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(offline_since IS NOT NULL), 0) FROM hosts`).Scan(&total, &offline)
+	return
+}
+
+// ensureColumn aggiunge una colonna se manca (MySQL non ha ADD COLUMN IF NOT EXISTS).
+func (s *Store) ensureColumn(ctx context.Context, table, column, def string) error {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+		table, column).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	s.log.Info("aggiornamento schema", "tabella", table, "colonna", column)
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN `%s` %s", table, column, def))
+	return err
 }
 
 // replaceGroups riscrive i gruppi dell'host. Sono poche righe per host,

@@ -1,6 +1,6 @@
 # Bmon collector
 
-Versione **0.2.0**. Primo componente di Bmon, il sostituto di M/Monit: riceve i report che gli agent Monit
+Versione **0.3.0**. Primo componente di Bmon, il sostituto di M/Monit: riceve i report che gli agent Monit
 inviano con `set mmonit` e li salva su MySQL/MariaDB.
 
 Usa **lo stesso protocollo di M/Monit** (POST XML su `/collector` con Basic Auth),
@@ -12,6 +12,7 @@ Cosa fa:
 - registra gli host per `monit_id` (il contenuto di `.monit.id`): hostname, versione, OS, CPU/RAM, poll
 - tiene lo **stato corrente** di ogni servizio (status, monitor, data della raccolta, quando è cambiato lo status) e tutte le metriche specifiche del tipo in una colonna JSON
 - elimina i servizi che spariscono dal monitrc
+- segnala gli **host offline** (Monit che smette di inviare report) e il loro ritorno online
 - salva i **gruppi** dei servizi (direttiva `group` del monitrc) nella tabella `service_groups`
 - salva lo **storico eventi**, senza duplicati quando Monit li reinvia dalla eventqueue
 - segnala nel log le VM clonate con lo stesso `.monit.id` (stesso id, hostname che cambia)
@@ -77,6 +78,8 @@ Configurazione (variabili d'ambiente oppure flag, `bmon-collector -h`):
 | `BMON_AUTH` | `-auth` | obbligatoria | `utente:pass[,utente2:pass2]` |
 | `BMON_TRUSTED_PROXIES` | `-trusted-proxies` | `127.0.0.1/32,::1/128` | da chi accettare `X-Real-IP` |
 | `BMON_LOG_LEVEL` | `-log-level` | `info` | `debug` logga ogni report |
+| `BMON_OFFLINE_CYCLES` | `-offline-cycles` | `3` | cicli di poll senza report prima di dichiarare offline |
+| `BMON_OFFLINE_MIN` | `-offline-min` | `3m` | silenzio minimo, qualunque sia il poll |
 | | `-event-retention-days` | `180` | `0` = mai cancellare |
 | | `-db-conns` | `20` | |
 | | `-max-body` | 16 MiB | |
@@ -104,13 +107,39 @@ M/Monit e ne duplica ogni POST verso il collector (`mirror`). Così si confronta
 i due sistemi per tutto il tempo che serve, poi si fa il cambio sul proxy.
 Gli host non vengono toccati in nessuna delle due fasi.
 
+## Host offline
+
+Ogni 30 secondi il collector controlla gli host che non inviano report da più di
+`max(BMON_OFFLINE_MIN, BMON_OFFLINE_CYCLES × poll dell'host)`, con i default
+3 minuti oppure 3 cicli. Quando un host supera la soglia:
+
+- il log riporta `level=WARN msg="host offline: nessun report da Monit" host=... ultimo_report=... silenzio=...`
+- `hosts.offline_since` viene valorizzato
+- nella tabella `events` viene registrato un evento con `service='Monit'`, `event_id=0`, `state=1`
+
+Al primo report successivo il log riporta `host di nuovo online ... durata=...`,
+`offline_since` torna NULL e viene registrato un evento con `state=0`. Ogni
+transizione viene segnalata una sola volta, non a ogni controllo.
+
+Il controllo non distingue un host spento da Monit fermo o da un problema di
+rete: in tutti e tre i casi il report non arriva.
+
+Dopo un riavvio del collector gli host non vengono dichiarati offline finché
+il collector non è attivo da almeno la soglia, così un fermo del collector
+non genera centinaia di falsi allarmi.
+
+Un host dismesso resta offline (senza nuovi log). Per toglierlo:
+`DELETE FROM hosts WHERE hostname = '...'`, che elimina anche i suoi servizi ed eventi.
+
+`/healthz` riporta `hosts` e `hosts_offline`.
+
 ## Query utili
 
 ```sql
--- host che non comunicano da più di 3 cicli di poll
-SELECT hostname, remote_addr, last_seen
-FROM hosts
-WHERE last_seen < UTC_TIMESTAMP() - INTERVAL 3 * poll_interval SECOND;
+-- host offline, da quanto tempo
+SELECT hostname, remote_addr, offline_since,
+       TIMEDIFF(UTC_TIMESTAMP(), offline_since) AS da
+FROM hosts WHERE offline_since IS NOT NULL ORDER BY offline_since;
 
 -- servizi in errore, i più vecchi per primi
 SELECT h.hostname, s.name, s.status, s.status_changed_at
