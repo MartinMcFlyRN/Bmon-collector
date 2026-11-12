@@ -1,6 +1,6 @@
 # Bmon collector
 
-Version **0.5.0**. First component of Bmon, a replacement for M/Monit: it
+Version **0.5.0**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
 receives the reports that Monit agents send with `set mmonit` and stores them
 in MySQL/MariaDB.
 
@@ -226,3 +226,13 @@ events (e.g. 0x20 connection, 0x200 non exist); 0 means OK.
 - **Actions for unreachable hosts**: actions go through Monit's httpd (0.5.0
   stores the credentials for Bmon-web), which is impossible for hosts on LANs
   the web server cannot reach. Another mechanism will be needed for them.
+
+## License
+
+Bmon collector is free software, released under the **GNU Affero General Public
+License, version 3** (AGPL-3.0). The full text is in [LICENSE](LICENSE), from
+<https://www.gnu.org/licenses/agpl-3.0.txt>.
+
+In short: you may use, study, modify and redistribute it. If you distribute it,
+or let other people use a modified version over a network, you must make the
+corresponding source code available to them under the same license.
