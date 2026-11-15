@@ -38,10 +38,13 @@ func TestClassifyEvent(t *testing.T) {
 
 func TestParseKinds(t *testing.T) {
 	k, err := ParseKinds("host_down, host_up")
-	if err != nil || len(k) != 2 || !k[KindHostDown] || k[KindServiceFailed] {
+	if err != nil || !k[KindHostDown] || !k[KindHostUp] || !k[KindHostsUp] || k[KindServiceFailed] || k[KindEmergency] {
 		t.Fatalf("%v %v", k, err)
 	}
-	if k, _ := ParseKinds("all"); len(k) != 6 {
+	if k, _ := ParseKinds("emergency"); !k[KindEmergency] || !k[KindEmergencyUpdate] || !k[KindEmergencyOver] || len(k) != 3 {
+		t.Fatalf("emergency: %v", k)
+	}
+	if k, _ := ParseKinds("all"); len(k) != len(kindNames) {
 		t.Fatal("all")
 	}
 	if _, err := ParseKinds("nope"); err == nil {

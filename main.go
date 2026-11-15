@@ -28,7 +28,7 @@ import (
 // time with -ldflags "-X main.Version=0.1.0-dev+abc123".
 const Name = "Bmon collector"
 
-var Version = "0.6.0"
+var Version = "0.7.0"
 
 type config struct {
 	listen         string
@@ -48,6 +48,9 @@ type config struct {
 	slackMention   string
 	slackKinds     map[Kind]bool
 	slackTest      bool
+	emergencyHosts int
+	emergencyWin   time.Duration
+	emergencyUpd   time.Duration
 }
 
 type credential struct{ user, pass string }
@@ -112,6 +115,12 @@ func loadConfig() (*config, error) {
 		"mention added to host down messages, e.g. <!channel>, <!here>, <@U012AB3CD>; empty = none (env BMON_SLACK_MENTION)")
 	flag.StringVar(&slackNotify, "slack-notify", env("BMON_SLACK_NOTIFY", "all"),
 		"notifications to send: all, or a list of service_failed,service_ok,monit_stopped,monit_started,host_down,host_up (env BMON_SLACK_NOTIFY)")
+	flag.IntVar(&c.emergencyHosts, "emergency-hosts", envInt("BMON_EMERGENCY_HOSTS", 10),
+		"hosts down within the emergency window that start an emergency; 0 = disabled (env BMON_EMERGENCY_HOSTS)")
+	flag.DurationVar(&c.emergencyWin, "emergency-window", envDur("BMON_EMERGENCY_WINDOW", 5*time.Minute),
+		"window for the emergency threshold (env BMON_EMERGENCY_WINDOW)")
+	flag.DurationVar(&c.emergencyUpd, "emergency-update", envDur("BMON_EMERGENCY_UPDATE", 3*time.Minute),
+		"minimum interval between emergency progress updates (env BMON_EMERGENCY_UPDATE)")
 	flag.BoolVar(&c.slackTest, "slack-test", false, "send one sample message of each kind to Slack and exit")
 	flag.StringVar(&c.logLevel, "log-level", env("BMON_LOG_LEVEL", "info"), "debug|info|warn|error")
 	showVersion := flag.Bool("version", false, "print the version and exit")
@@ -189,10 +198,11 @@ type stats struct {
 }
 
 type server struct {
-	cfg   *config
-	store *Store
-	log   *slog.Logger
-	stats stats
+	cfg       *config
+	store     *Store
+	log       *slog.Logger
+	stats     stats
+	emergency *Emergency
 }
 
 func (s *server) checkAuth(r *http.Request) bool {
@@ -302,8 +312,12 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain")
 	total, offline, _ := s.store.CountOffline(ctx)
-	fmt.Fprintf(w, "ok\nversion %s\nhosts %d\nhosts_offline %d\nreports %d\nevents %d\nrejected %d\nstorage_errors %d\n",
-		Version, total, offline, s.stats.reports.Load(), s.stats.events.Load(), s.stats.rejected.Load(), s.stats.failed.Load())
+	em := 0
+	if s.emergency != nil && s.emergency.Active() {
+		em = 1
+	}
+	fmt.Fprintf(w, "ok\nversion %s\nemergency %d\nhosts %d\nhosts_offline %d\nreports %d\nevents %d\nrejected %d\nstorage_errors %d\n",
+		Version, em, total, offline, s.stats.reports.Load(), s.stats.events.Load(), s.stats.rejected.Load(), s.stats.failed.Load())
 }
 
 func (s *server) offlineLoop(ctx context.Context) {
@@ -389,14 +403,17 @@ func main() {
 	}
 
 	notifierDone := make(chan struct{})
+	var slack *SlackNotifier
 	if cfg.slackWebhook != "" {
-		slack := NewSlackNotifier(cfg.slackWebhook, cfg.slackMention, cfg.slackKinds, log)
-		store.SetNotifier(slack)
+		slack = NewSlackNotifier(cfg.slackWebhook, cfg.slackMention, cfg.slackKinds, log)
 		go func() { slack.Run(ctx); close(notifierDone) }()
 		var enabled []string
-		for k := KindServiceFailed; k <= KindHostUp; k++ {
-			if cfg.slackKinds[k] {
-				enabled = append(enabled, k.String())
+		for _, name := range kindOrder {
+			for k, n := range kindNames {
+				if n == name && cfg.slackKinds[k] {
+					enabled = append(enabled, name)
+					break
+				}
 			}
 		}
 		log.Info("Slack notifications enabled", "notify", strings.Join(enabled, ","), "mention", cfg.slackMention)
@@ -404,8 +421,20 @@ func main() {
 		close(notifierDone)
 		log.Info("Slack notifications disabled (BMON_SLACK_WEBHOOK not set)")
 	}
+	// The emergency detector runs even without Slack: it still logs emergencies.
+	var inner Notifier
+	if slack != nil {
+		inner = slack
+	}
+	emergency := NewEmergency(inner, cfg.emergencyHosts, cfg.emergencyWin, log)
+	emergency.Update = cfg.emergencyUpd
+	store.SetNotifier(emergency)
+	go emergency.Run(ctx)
+	if cfg.emergencyHosts > 0 {
+		log.Info("emergency detection enabled", "hosts", cfg.emergencyHosts, "window", cfg.emergencyWin)
+	}
 
-	s := &server{cfg: cfg, store: store, log: log}
+	s := &server{cfg: cfg, store: store, log: log, emergency: emergency}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/collector", s.handleCollector)
 	mux.HandleFunc("/healthz", s.handleHealth)
@@ -447,7 +476,7 @@ func slackTest(ctx context.Context, cfg *config, log *slog.Logger) int {
 	// No mention in the test, so the whole channel is not pinged.
 	slack := NewSlackNotifier(cfg.slackWebhook, "", cfg.slackKinds, log)
 	var batch []Notification
-	for _, n := range SampleNotifications() {
+	for _, n := range append(SampleNotifications(), SampleEmergency()...) {
 		if cfg.slackKinds[n.Kind] {
 			batch = append(batch, n)
 		}

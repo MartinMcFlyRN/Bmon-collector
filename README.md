@@ -1,6 +1,6 @@
 # Bmon collector
 
-Version **0.6.0**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
+Version **0.7.0**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
 receives the reports that Monit agents send with `set mmonit` and stores them
 in MySQL/MariaDB.
 
@@ -18,6 +18,7 @@ What it does:
 - keeps the **event history**, with no duplicates when Monit resends events from its eventqueue
 - logs a warning for cloned VMs sharing the same `.monit.id` (same id, changing hostname)
 - sends **Slack notifications** for failing/recovered services, Monit stop/start and host down/up
+- declares an **emergency** when many hosts go down in a short time, with one message instead of a flood
 - exposes `/healthz` (database ping and counters)
 
 - stores the **Monit httpd credentials** sent in the reports (optionally encrypted), so that [Bmon-web](https://github.com/MartinMcFlyRN/Bmon-web) can send start/stop/restart/monitor/unmonitor to the agents, like M/Monit
@@ -90,6 +91,9 @@ Configuration (environment variables or flags, see `bmon-collector -h`):
 | `BMON_SLACK_WEBHOOK` | `-slack-webhook` | empty | Slack incoming webhook URL; empty = no Slack notifications |
 | `BMON_SLACK_MENTION` | `-slack-mention` | `<!channel>` | mention added to host down messages; empty = none |
 | `BMON_SLACK_NOTIFY` | `-slack-notify` | `all` | which notifications to send, see below |
+| `BMON_EMERGENCY_HOSTS` | `-emergency-hosts` | `10` | hosts down within the window that start an emergency; `0` = disabled |
+| `BMON_EMERGENCY_WINDOW` | `-emergency-window` | `5m` | window for the emergency threshold |
+| `BMON_EMERGENCY_UPDATE` | `-emergency-update` | `3m` | minimum interval between emergency updates |
 | | `-event-retention-days` | `180` | `0` = never delete |
 | | `-db-conns` | `20` | |
 | | `-max-body` | 16 MiB | |
@@ -191,6 +195,7 @@ webhook. Problems have a **red** bar, recoveries a **green** one:
 | `monit_started` | Monit starts on a host | green |
 | `host_down` | the host stops sending reports (see "Offline hosts") | red, with a headline and `BMON_SLACK_MENTION` |
 | `host_up` | the host is reporting again, with the outage length | green, with a headline |
+| `emergency` | many hosts down in a short time: start, updates, end (see below) | red, then green at the end; the start carries the mention |
 
 `BMON_SLACK_NOTIFY=all` (default) sends everything; otherwise list the kinds,
 e.g. `BMON_SLACK_NOTIFY=service_failed,service_ok,host_down,host_up`.
@@ -227,6 +232,43 @@ Behaviour:
 - Stopping Monit on a host produces `monit_stopped` and, once the offline
   threshold is passed, `host_down`: the collector cannot tell an intentional stop
   from a crash.
+
+## Emergency mode
+
+When at least `BMON_EMERGENCY_HOSTS` hosts (default 10) go down within
+`BMON_EMERGENCY_WINDOW` (default 5 minutes), something serious is going on
+(a provider or network outage) and single notifications would only flood the
+channel. Instead:
+
+1. **One emergency message**: `@channel 🚨🚨 EMERGENCY: N HOSTS DOWN`, with the
+   list of hosts. Hosts that had already been notified down one by one in the
+   window are included in the count.
+2. **While it lasts**, host down/up are counted and not sent one by one, and the
+   service/Monit notifications of the hosts involved are suppressed and counted
+   (when the network comes back, Monit resends its eventqueue backlog: that is
+   what would flood the channel). A progress update is sent at most every
+   `BMON_EMERGENCY_UPDATE` (default 3 minutes), only if something changed:
+   hosts still down, how many are back, notifications suppressed.
+3. **The end**: when fewer than `BMON_EMERGENCY_HOSTS` hosts are still down and
+   none went down in the last window, `✅ EMERGENCY OVER` reports how many are back
+   and lists those still down. These go back to normal handling: their HOST UP
+   is notified one by one, while the backlog they send when they return is
+   suppressed. For 5 minutes after a host recovers, its backlog keeps being suppressed.
+
+Suppressed notifications are still in the database (`events`), visible in Bmon-web.
+
+Also, when many hosts come back at once outside an emergency (e.g. after a
+collector restart), one `✅ N HOSTS UP` message replaces the single ones.
+
+Host down/up are held for 10 seconds before being sent, so that a whole round
+of the offline check is evaluated together. The log shows
+`EMERGENCY: many hosts down` and `EMERGENCY over`; `/healthz` reports `emergency 0|1`.
+Emergency detection works (and logs) even without Slack.
+
+With 153 of 200 simulated hosts going down at once, the channel receives
+5 messages in total (3 single host down before the threshold, emergency,
+update, end, and one grouped HOST UP for the last 5 hosts) instead of ~20
+messages with `@channel` and ~150 HOST UP.
 
 ## Useful queries
 

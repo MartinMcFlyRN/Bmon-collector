@@ -4,6 +4,21 @@ This project follows [Semantic Versioning](https://semver.org/).
 Until 1.0, the database schema and configuration may change between minor
 versions; the notes always say what to do.
 
+## [0.7.0] - 2026-11-15
+
+- Added: emergency mode. When `BMON_EMERGENCY_HOSTS` hosts (default 10) go down
+  within `BMON_EMERGENCY_WINDOW` (default 5m), one `EMERGENCY: N HOSTS DOWN`
+  message with the mention replaces the single host down messages; while it lasts,
+  host down/up are counted and the service/Monit notifications of the hosts
+  involved (eventqueue backlog) are suppressed; progress updates at most every
+  `BMON_EMERGENCY_UPDATE` (default 3m); `EMERGENCY OVER` lists the hosts still down.
+- Added: many hosts back up at once outside an emergency → one `N HOSTS UP` message.
+- Added: `emergency` notification kind for `BMON_SLACK_NOTIFY`; `/healthz` reports `emergency`.
+- Changed: host down/up notifications are held 10 seconds before being sent.
+
+Upgrade: replace the binary and restart. No schema changes; emergency mode is
+on by default (`BMON_EMERGENCY_HOSTS=0` disables it).
+
 ## [0.6.0] - 2026-11-15
 
 - Added: Slack notifications through an incoming webhook (`BMON_SLACK_WEBHOOK`):

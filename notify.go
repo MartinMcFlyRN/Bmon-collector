@@ -25,23 +25,35 @@ const (
 	KindMonitStarted
 	KindHostDown
 	KindHostUp
+	KindEmergency       // many hosts down in a short time
+	KindEmergencyUpdate // progress while the emergency lasts
+	KindEmergencyOver   // emergency finished
+	KindHostsUp         // many hosts back up at once, outside an emergency
 )
 
 var kindNames = map[Kind]string{
-	KindServiceFailed: "service_failed",
-	KindServiceOK:     "service_ok",
-	KindMonitStopped:  "monit_stopped",
-	KindMonitStarted:  "monit_started",
-	KindHostDown:      "host_down",
-	KindHostUp:        "host_up",
+	KindServiceFailed:   "service_failed",
+	KindServiceOK:       "service_ok",
+	KindMonitStopped:    "monit_stopped",
+	KindMonitStarted:    "monit_started",
+	KindHostDown:        "host_down",
+	KindHostUp:          "host_up",
+	KindHostsUp:         "host_up",
+	KindEmergency:       "emergency",
+	KindEmergencyUpdate: "emergency",
+	KindEmergencyOver:   "emergency",
 }
+
+// kindOrder lists the configurable names, in display order.
+var kindOrder = []string{"service_failed", "service_ok", "monit_stopped", "monit_started", "host_down", "host_up", "emergency"}
 
 func (k Kind) String() string { return kindNames[k] }
 
 // Problem reports whether the notification is about something going wrong
 // (red) rather than something getting back to normal (green).
 func (k Kind) Problem() bool {
-	return k == KindServiceFailed || k == KindMonitStopped || k == KindHostDown
+	return k == KindServiceFailed || k == KindMonitStopped || k == KindHostDown ||
+		k == KindEmergency || k == KindEmergencyUpdate
 }
 
 // ParseKinds parses a comma-separated list of kind names; "all" or "" means every kind.
@@ -64,7 +76,7 @@ func ParseKinds(s string) (map[Kind]bool, error) {
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("unknown notification kind %q (valid: service_failed, service_ok, monit_stopped, monit_started, host_down, host_up, all)", name)
+			return nil, fmt.Errorf("unknown notification kind %q (valid: %s, all)", name, strings.Join(kindOrder, ", "))
 		}
 	}
 	return out, nil
@@ -82,7 +94,15 @@ type Notification struct {
 	Time        time.Time
 	LastReport  time.Time     // host down: last report received
 	Duration    time.Duration // host down: silence so far; host up: outage length
-	Threshold   time.Duration // host down: offline threshold
+	Threshold   time.Duration // host down: offline threshold; emergency: window
+
+	// emergency / hosts up
+	Hosts      []string // hosts currently down (emergency) or back up (hosts up)
+	Count      int      // len(Hosts)
+	Involved   int      // hosts that went down during the emergency
+	Recovered  int      // hosts back up during the emergency
+	Suppressed int      // service/Monit notifications not sent
+	Previous   int      // hosts down in the previous emergency message
 }
 
 // Notifier receives notifications. Implementations must not block.
@@ -358,6 +378,28 @@ func quote(s string) string {
 	return "\n>" + strings.ReplaceAll(slackEscape(s), "\n", "\n>")
 }
 
+// hostList formats host names, keeping the text well below Slack's 3000
+// characters per section.
+func hostList(hosts []string) string {
+	const max = 2200
+	var b strings.Builder
+	for i, h := range hosts {
+		item := slackEscape(h)
+		if i > 0 {
+			item = ", " + item
+		}
+		if b.Len()+len(item) > max {
+			fmt.Fprintf(&b, " … and %d more", len(hosts)-i)
+			break
+		}
+		b.WriteString(item)
+	}
+	if b.Len() == 0 {
+		return "—"
+	}
+	return b.String()
+}
+
 // render returns the main text, the context line and the plain fallback of a notification.
 func render(n Notification) (main, context, fallback string) {
 	host := "*" + slackEscape(n.Host) + "*"
@@ -390,12 +432,40 @@ func render(n Notification) (main, context, fallback string) {
 	case KindHostUp:
 		main = fmt.Sprintf(":white_check_mark: *HOST UP* · %s\nMonit is reporting again after *%s*.", host, fmtDur(n.Duration))
 		fallback = fmt.Sprintf("HOST UP %s after %s", n.Host, fmtDur(n.Duration))
+	case KindEmergency:
+		main = fmt.Sprintf(":rotating_light: *EMERGENCY: %d hosts down* within %s.\nSingle host notifications are paused; updates will follow.\n*Down:* %s",
+			n.Count, fmtDur(n.Threshold), hostList(n.Hosts))
+		fallback = fmt.Sprintf("EMERGENCY: %d hosts down", n.Count)
+	case KindEmergencyUpdate:
+		trend := "no change"
+		switch {
+		case n.Count > n.Previous:
+			trend = fmt.Sprintf("+%d since the last update", n.Count-n.Previous)
+		case n.Count < n.Previous:
+			trend = fmt.Sprintf("−%d since the last update", n.Previous-n.Count)
+		}
+		main = fmt.Sprintf(":rotating_light: *EMERGENCY ongoing* for %s: *%d hosts down* (%s).\n%d of %d back up · %d notifications suppressed\n*Still down:* %s",
+			fmtDur(n.Duration), n.Count, trend, n.Recovered, n.Involved, n.Suppressed, hostList(n.Hosts))
+		fallback = fmt.Sprintf("EMERGENCY ongoing: %d hosts down", n.Count)
+	case KindEmergencyOver:
+		main = fmt.Sprintf(":white_check_mark: *EMERGENCY OVER* after %s.\n%d of %d hosts back up · %d notifications suppressed (check Bmon-web for the services)",
+			fmtDur(n.Duration), n.Recovered, n.Involved, n.Suppressed)
+		if n.Count > 0 {
+			main += fmt.Sprintf("\n*Still down (%d):* %s", n.Count, hostList(n.Hosts))
+		}
+		fallback = fmt.Sprintf("EMERGENCY OVER: %d of %d hosts back up", n.Recovered, n.Involved)
+	case KindHostsUp:
+		main = fmt.Sprintf(":white_check_mark: *%d HOSTS UP*: Monit is reporting again.\n%s", n.Count, hostList(n.Hosts))
+		fallback = fmt.Sprintf("%d hosts back up", n.Count)
 	}
 	if n.Remote != "" {
 		ctx = append(ctx, slackEscape(n.Remote))
 	}
 	if n.Kind != KindHostDown {
 		ctx = append(ctx, slackDate(n.Time))
+	}
+	if n.Kind == KindEmergencyOver && n.Count > 0 {
+		ctx = append(ctx, "hosts still down will be notified one by one when they come back")
 	}
 	var parts []string
 	for _, c := range ctx {
@@ -428,7 +498,7 @@ func (s *SlackNotifier) buildPayload(batch []Notification, withBlocks bool) []by
 		Attachments []attachment `json:"attachments"`
 	}{}
 
-	var down, up []string
+	var down, up, head []string
 	for _, n := range batch {
 		main, ctx, fb := render(n)
 		a := attachment{Color: slackGreen, Fallback: fb}
@@ -453,12 +523,23 @@ func (s *SlackNotifier) buildPayload(batch []Notification, withBlocks bool) []by
 			down = append(down, slackEscape(n.Host))
 		case KindHostUp:
 			up = append(up, slackEscape(n.Host))
+		case KindEmergency:
+			h := fmt.Sprintf(":rotating_light::rotating_light: *EMERGENCY: %d HOSTS DOWN* :rotating_light::rotating_light:", n.Count)
+			if s.mention != "" {
+				h = s.mention + " " + h
+			}
+			head = append(head, h)
+		case KindEmergencyUpdate:
+			head = append(head, fmt.Sprintf(":rotating_light: *EMERGENCY ongoing: %d hosts down*", n.Count))
+		case KindEmergencyOver:
+			head = append(head, fmt.Sprintf(":white_check_mark: *EMERGENCY OVER: %d of %d hosts back up*", n.Recovered, n.Involved))
+		case KindHostsUp:
+			head = append(head, fmt.Sprintf(":white_check_mark: *%d HOSTS UP*", n.Count))
 		}
 	}
 
-	// Host down/up also get a headline above the attachments: it is always
-	// visible (attachments may be collapsed) and carries the channel mention.
-	var head []string
+	// Host down/up and emergencies also get a headline above the attachments:
+	// it is always visible (attachments may be collapsed) and carries the mention.
 	if len(down) > 0 {
 		h := ":rotating_light: *HOST DOWN: " + strings.Join(down, ", ") + "*"
 		if s.mention != "" {
@@ -490,5 +571,21 @@ func SampleNotifications() []Notification {
 		{Kind: KindHostDown, Host: "mail01.example.com", Remote: "203.0.113.30",
 			LastReport: now.Add(-200 * time.Second), Duration: 200 * time.Second, Threshold: 3 * time.Minute, Time: now},
 		{Kind: KindHostUp, Host: "mail01.example.com", Remote: "203.0.113.30", Duration: 754 * time.Second, Time: now},
+	}
+}
+
+// SampleEmergency returns the messages of an emergency, for -slack-test.
+func SampleEmergency() []Notification {
+	now := time.Now()
+	var hosts []string
+	for i := 1; i <= 120; i++ {
+		hosts = append(hosts, fmt.Sprintf("srv%03d.example.com", i))
+	}
+	return []Notification{
+		{Kind: KindEmergency, Time: now, Hosts: hosts, Count: 120, Involved: 120, Threshold: 5 * time.Minute},
+		{Kind: KindEmergencyUpdate, Time: now, Hosts: hosts[:35], Count: 35, Previous: 120, Involved: 120,
+			Recovered: 85, Suppressed: 412, Duration: 9 * time.Minute},
+		{Kind: KindEmergencyOver, Time: now, Hosts: hosts[:3], Count: 3, Involved: 120, Recovered: 117,
+			Suppressed: 530, Duration: 17 * time.Minute},
 	}
 }
