@@ -1,6 +1,6 @@
 # Bmon collector
 
-Version **0.5.0**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
+Version **0.6.0**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
 receives the reports that Monit agents send with `set mmonit` and stores them
 in MySQL/MariaDB.
 
@@ -17,6 +17,7 @@ What it does:
 - stores service **groups** (the `group` statement in monitrc) in the `service_groups` table
 - keeps the **event history**, with no duplicates when Monit resends events from its eventqueue
 - logs a warning for cloned VMs sharing the same `.monit.id` (same id, changing hostname)
+- sends **Slack notifications** for failing/recovered services, Monit stop/start and host down/up
 - exposes `/healthz` (database ping and counters)
 
 - stores the **Monit httpd credentials** sent in the reports (optionally encrypted), so that [Bmon-web](https://github.com/MartinMcFlyRN/Bmon-web) can send start/stop/restart/monitor/unmonitor to the agents, like M/Monit
@@ -86,6 +87,9 @@ Configuration (environment variables or flags, see `bmon-collector -h`):
 | `BMON_OFFLINE_CYCLES` | `-offline-cycles` | `3` | poll cycles without a report before a host is offline |
 | `BMON_OFFLINE_MIN` | `-offline-min` | `3m` | minimum silence, regardless of the poll interval |
 | | `-offline-check-every` | `30s` | how often silent hosts are checked |
+| `BMON_SLACK_WEBHOOK` | `-slack-webhook` | empty | Slack incoming webhook URL; empty = no Slack notifications |
+| `BMON_SLACK_MENTION` | `-slack-mention` | `<!channel>` | mention added to host down messages; empty = none |
+| `BMON_SLACK_NOTIFY` | `-slack-notify` | `all` | which notifications to send, see below |
 | | `-event-retention-days` | `180` | `0` = never delete |
 | | `-db-conns` | `20` | |
 | | `-max-body` | 16 MiB | |
@@ -174,6 +178,56 @@ A decommissioned host stays offline (without further log lines). To remove it:
 
 `/healthz` reports `hosts` and `hosts_offline`.
 
+## Slack notifications
+
+With `BMON_SLACK_WEBHOOK` set, the collector posts to the Slack channel of the
+webhook. Problems have a **red** bar, recoveries a **green** one:
+
+| Kind (`BMON_SLACK_NOTIFY`) | When | Color |
+|---|---|---|
+| `service_failed` | a Monit check fails (or a "changed" test fires, e.g. checksum) | red |
+| `service_ok` | a check recovers | green |
+| `monit_stopped` | Monit is stopped on a host | red |
+| `monit_started` | Monit starts on a host | green |
+| `host_down` | the host stops sending reports (see "Offline hosts") | red, with a headline and `BMON_SLACK_MENTION` |
+| `host_up` | the host is reporting again, with the outage length | green, with a headline |
+
+`BMON_SLACK_NOTIFY=all` (default) sends everything; otherwise list the kinds,
+e.g. `BMON_SLACK_NOTIFY=service_failed,service_ok,host_down,host_up`.
+
+Setup:
+
+1. In Slack, create an app (api.slack.com/apps → *Create New App* → *From scratch*),
+   enable **Incoming Webhooks**, *Add New Webhook to Workspace*, pick the channel.
+2. Put the URL in `/etc/bmon-collector/env`: `BMON_SLACK_WEBHOOK=https://hooks.slack.com/services/...`
+   (the URL is a secret: anyone who has it can post to the channel).
+3. Check it without waiting for a real failure; this posts one sample of each
+   kind (without the mention), then exits:
+   ```sh
+   bmon-collector -slack-test -slack-webhook "$(grep ^BMON_SLACK_WEBHOOK= /etc/bmon-collector/env | cut -d= -f2-)"
+   ```
+4. `systemctl restart bmon-collector`; the log shows `Slack notifications enabled`.
+
+The collector server must reach `hooks.slack.com:443` (the standard
+`HTTPS_PROXY` variable is honoured).
+
+Behaviour:
+
+- **No duplicates.** Events resent from Monit's eventqueue are already in the
+  database and are not notified again. After every start or reload Monit re-sends
+  a "failed" event for each service that is still failing: those are not notified
+  again either; a failure is notified only when that failure was not already
+  known for the service. Reload events and "action done" events are not notified.
+- **Bursts are grouped**: notifications arriving within 2 seconds are sent as one
+  message (up to 10), and messages are paced at about one per second as Slack
+  requires. A network failure towards Slack is retried with backoff; Slack being
+  down never slows down report collection.
+- If Slack rejects the layout, the message is resent as plain text so that the
+  alert is not lost.
+- Stopping Monit on a host produces `monit_stopped` and, once the offline
+  threshold is passed, `host_down`: the collector cannot tell an intentional stop
+  from a crash.
+
 ## Useful queries
 
 ```sql
@@ -221,7 +275,7 @@ events (e.g. 0x20 connection, 0x200 non exist); 0 means OK.
 - **Metrics history**: only the latest value is kept today, in `services.data`.
   Charts need a time series: either an aggregated table in MySQL or a TSDB. This
   has to be decided before building the UI.
-- **Notifications**: email/chat alerts for offline hosts and Monit events.
+- **More notification channels**: email, Telegram, per-group routing.
 - **UI / read API**.
 - **Actions for unreachable hosts**: actions go through Monit's httpd (0.5.0
   stores the credentials for Bmon-web), which is impossible for hosts on LANs

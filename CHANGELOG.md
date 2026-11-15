@@ -4,6 +4,23 @@ This project follows [Semantic Versioning](https://semver.org/).
 Until 1.0, the database schema and configuration may change between minor
 versions; the notes always say what to do.
 
+## [0.6.0] - 2026-11-15
+
+- Added: Slack notifications through an incoming webhook (`BMON_SLACK_WEBHOOK`):
+  service failed / back to OK, Monit stopped / started, host down / up. Problems
+  have a red bar, recoveries a green one; host down/up also get a headline, and
+  host down carries a mention (`BMON_SLACK_MENTION`, default `<!channel>`).
+- Added: `BMON_SLACK_NOTIFY` selects which kinds are sent (default `all`).
+- Added: `-slack-test` posts one sample of each kind and exits.
+- No duplicate notifications for events resent from Monit's eventqueue or
+  re-sent by Monit after a start/reload; bursts are grouped and paced for Slack.
+- Fixed: after a Monit start/reload, services reported as initializing
+  (monitor=2, status 0) no longer reset a failing service to OK in the
+  database; the last known status is kept until Monit checks it again.
+
+Upgrade: replace the binary and restart. No schema changes. To enable Slack,
+add `BMON_SLACK_WEBHOOK` to `/etc/bmon-collector/env` (see README).
+
 ## [0.5.0] - 2026-11-12
 
 - Added: the Monit httpd credentials included in the reports (`<server><credentials>`)

@@ -28,7 +28,7 @@ import (
 // time with -ldflags "-X main.Version=0.1.0-dev+abc123".
 const Name = "Bmon collector"
 
-var Version = "0.5.0"
+var Version = "0.6.0"
 
 type config struct {
 	listen         string
@@ -44,6 +44,10 @@ type config struct {
 	offlineEvery   time.Duration
 	storeCreds     bool
 	credsKey       string
+	slackWebhook   string
+	slackMention   string
+	slackKinds     map[Kind]bool
+	slackTest      bool
 }
 
 type credential struct{ user, pass string }
@@ -101,6 +105,14 @@ func loadConfig() (*config, error) {
 		"store the Monit httpd credentials sent in the reports, so that Bmon-web can send actions (env BMON_STORE_CREDENTIALS)")
 	flag.StringVar(&c.credsKey, "credentials-key", env("BMON_CREDENTIALS_KEY", ""),
 		"base64 32-byte key to encrypt the stored credentials; empty = stored in clear (env BMON_CREDENTIALS_KEY)")
+	var slackNotify string
+	flag.StringVar(&c.slackWebhook, "slack-webhook", env("BMON_SLACK_WEBHOOK", ""),
+		"Slack incoming webhook URL; empty = Slack notifications disabled (env BMON_SLACK_WEBHOOK)")
+	flag.StringVar(&c.slackMention, "slack-mention", env("BMON_SLACK_MENTION", "<!channel>"),
+		"mention added to host down messages, e.g. <!channel>, <!here>, <@U012AB3CD>; empty = none (env BMON_SLACK_MENTION)")
+	flag.StringVar(&slackNotify, "slack-notify", env("BMON_SLACK_NOTIFY", "all"),
+		"notifications to send: all, or a list of service_failed,service_ok,monit_stopped,monit_started,host_down,host_up (env BMON_SLACK_NOTIFY)")
+	flag.BoolVar(&c.slackTest, "slack-test", false, "send one sample message of each kind to Slack and exit")
 	flag.StringVar(&c.logLevel, "log-level", env("BMON_LOG_LEVEL", "info"), "debug|info|warn|error")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
@@ -110,6 +122,21 @@ func loadConfig() (*config, error) {
 	if *showVersion {
 		fmt.Printf("%s %s\n", Name, Version)
 		os.Exit(0)
+	}
+	kinds, err := ParseKinds(slackNotify)
+	if err != nil {
+		return nil, fmt.Errorf("slack-notify: %w", err)
+	}
+	c.slackKinds = kinds
+	if c.slackWebhook != "" && !strings.HasPrefix(c.slackWebhook, "https://") &&
+		!strings.HasPrefix(c.slackWebhook, "http://127.0.0.1") && !strings.HasPrefix(c.slackWebhook, "http://localhost") {
+		return nil, errors.New("slack-webhook must be an https:// URL")
+	}
+	if c.slackTest {
+		if c.slackWebhook == "" {
+			return nil, errors.New("-slack-test needs a webhook (-slack-webhook or BMON_SLACK_WEBHOOK)")
+		}
+		return c, nil // no database needed
 	}
 
 	if c.dsn == "" {
@@ -330,6 +357,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if cfg.slackTest {
+		os.Exit(slackTest(ctx, cfg, log))
+	}
+
 	startCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	store, err := OpenStore(startCtx, cfg.dsn, cfg.maxConns, log)
 	if err == nil {
@@ -355,6 +386,23 @@ func main() {
 		log.Info("Monit httpd credentials are stored encrypted")
 	default:
 		log.Warn("Monit httpd credentials are stored in clear: set BMON_CREDENTIALS_KEY to encrypt them")
+	}
+
+	notifierDone := make(chan struct{})
+	if cfg.slackWebhook != "" {
+		slack := NewSlackNotifier(cfg.slackWebhook, cfg.slackMention, cfg.slackKinds, log)
+		store.SetNotifier(slack)
+		go func() { slack.Run(ctx); close(notifierDone) }()
+		var enabled []string
+		for k := KindServiceFailed; k <= KindHostUp; k++ {
+			if cfg.slackKinds[k] {
+				enabled = append(enabled, k.String())
+			}
+		}
+		log.Info("Slack notifications enabled", "notify", strings.Join(enabled, ","), "mention", cfg.slackMention)
+	} else {
+		close(notifierDone)
+		log.Info("Slack notifications disabled (BMON_SLACK_WEBHOOK not set)")
 	}
 
 	s := &server{cfg: cfg, store: store, log: log}
@@ -388,6 +436,30 @@ func main() {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+	// Give the notifier the chance to deliver what is still queued.
+	select {
+	case <-notifierDone:
+	case <-time.After(10 * time.Second):
+	}
+}
+
+func slackTest(ctx context.Context, cfg *config, log *slog.Logger) int {
+	// No mention in the test, so the whole channel is not pinged.
+	slack := NewSlackNotifier(cfg.slackWebhook, "", cfg.slackKinds, log)
+	var batch []Notification
+	for _, n := range SampleNotifications() {
+		if cfg.slackKinds[n.Kind] {
+			batch = append(batch, n)
+		}
+	}
+	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	if err := slack.SendNow(tctx, batch); err != nil {
+		fmt.Fprintln(os.Stderr, "Slack test failed:", err)
+		return 1
+	}
+	fmt.Printf("Slack test sent: %d sample notifications (without the %q mention).\n", len(batch), cfg.slackMention)
+	return 0
 }
 
 func withServerHeader(h http.Handler) http.Handler {

@@ -25,6 +25,20 @@ type Store struct {
 	// Monit httpd credentials: stored only if storeCreds is set, sealed by creds.
 	storeCreds bool
 	creds      *credentialSealer
+
+	// notifier receives notifications after the data is committed (may be nil).
+	notifier Notifier
+}
+
+func (s *Store) SetNotifier(n Notifier) { s.notifier = n }
+
+func (s *Store) emit(ns ...Notification) {
+	if s.notifier == nil {
+		return
+	}
+	for _, n := range ns {
+		s.notifier.Notify(n)
+	}
 }
 
 // SetCredentials configures how the Monit httpd credentials found in the
@@ -154,6 +168,13 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 			return fmt.Errorf("online event: %w", err)
 		}
 	}
+	// Status of the services before this report, to classify the events.
+	var prevStatus map[string]int64
+	if len(r.Events) > 0 {
+		if prevStatus, err = loadServiceStatus(ctx, tx, hostID); err != nil {
+			return fmt.Errorf("previous status: %w", err)
+		}
+	}
 	if err := s.upsertServices(ctx, tx, hostID, r.Services, now); err != nil {
 		return fmt.Errorf("services: %w", err)
 	}
@@ -164,15 +185,35 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 	if err := s.replaceGroups(ctx, tx, hostID, r.Groups); err != nil {
 		return fmt.Errorf("groups: %w", err)
 	}
+	var notes []Notification
 	for _, e := range r.Events {
-		if _, err := tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 			INSERT IGNORE INTO events
 			  (host_id, service, service_type, event_id, state, action, message, collected_at, received_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			hostID, trunc(e.Service, 255), e.ServiceType, e.ID, e.State, e.Action,
-			e.Message, nz(e.CollectedAt, now), now); err != nil {
+			e.Message, nz(e.CollectedAt, now), now)
+		if err != nil {
 			return fmt.Errorf("event: %w", err)
 		}
+		// 0 rows: already stored (resent from Monit's eventqueue), already notified.
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue
+		}
+		prev, known := prevStatus[e.Service]
+		if kind, ok := classifyEvent(e, prev, known); ok {
+			notes = append(notes, Notification{
+				Kind: kind, Host: r.Server.LocalHostname, Remote: remoteAddr,
+				Service: e.Service, ServiceType: e.ServiceType, EventID: e.ID,
+				Message: e.Message, Time: nz(e.CollectedAt, now),
+			})
+		}
+	}
+	if offlineSince != nil {
+		notes = append([]Notification{{
+			Kind: KindHostUp, Host: r.Server.LocalHostname, Remote: remoteAddr,
+			Duration: now.Sub(*offlineSince), Time: now,
+		}}, notes...)
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -181,7 +222,26 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 		s.log.Info("host back online", "host", r.Server.LocalHostname, "remote", remoteAddr,
 			"offline_since", offlineSince.Format(time.RFC3339), "duration", fmtDur(now.Sub(*offlineSince)))
 	}
+	s.emit(notes...)
 	return nil
+}
+
+func loadServiceStatus(ctx context.Context, tx *sql.Tx, hostID uint64) (map[string]int64, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name, status FROM services WHERE host_id = ?`, hostID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]int64{}
+	for rows.Next() {
+		var name string
+		var st int64
+		if err := rows.Scan(&name, &st); err != nil {
+			return nil, err
+		}
+		m[name] = st
+	}
+	return m, rows.Err()
 }
 
 // upsertHost also returns offline_since if the host was marked offline
@@ -276,6 +336,8 @@ const (
 	BmonEventID      = 0
 	StateSucceeded   = 0
 	StateFailed      = 1
+	StateChanged     = 2
+	StateChangedNot  = 3
 )
 
 func insertBmonEvent(ctx context.Context, ex interface {
@@ -301,7 +363,10 @@ func fmtDur(d time.Duration) string {
 	if h > 0 {
 		return fmt.Sprintf("%dh %dm", h, m)
 	}
-	return fmt.Sprintf("%dm %ds", m, int(d.Seconds())%60)
+	if sec := int(d.Seconds()) % 60; sec != 0 {
+		return fmt.Sprintf("%dm %ds", m, sec)
+	}
+	return fmt.Sprintf("%dm", m)
 }
 
 // OfflinePolicy: a host is offline when it has not sent a report for more
@@ -381,6 +446,10 @@ func (s *Store) CheckOffline(ctx context.Context, p OfflinePolicy) (int, error) 
 			return marked, err
 		}
 		marked++
+		s.emit(Notification{
+			Kind: KindHostDown, Host: c.name, Remote: c.addr,
+			LastReport: c.lastSeen, Duration: silence, Threshold: thr, Time: now,
+		})
 		s.log.Warn("host offline: no report from Monit", "host", c.name, "remote", c.addr,
 			"last_report", c.lastSeen.Format(time.RFC3339), "silence", fmtDur(silence), "threshold", fmtDur(thr))
 	}
@@ -462,9 +531,15 @@ func (s *Store) upsertServices(ctx context.Context, tx *sql.Tx, hostID uint64, s
 				string(data), now)
 		}
 		// Order matters: status_changed_at must be evaluated BEFORE status is updated.
+		// After a Monit start/reload the services are reported for a cycle or two
+		// as initializing (monitor=2) with status 0 before being checked again:
+		// in that case the last known status is kept, otherwise a failing service
+		// would look OK and its re-sent failure event would be notified again.
 		q.WriteString(` ON DUPLICATE KEY UPDATE
-			status_changed_at = IF(status <> VALUES(status), VALUES(status_changed_at), status_changed_at),
-			type = VALUES(type), status = VALUES(status), status_hint = VALUES(status_hint),
+			status_changed_at = IF(VALUES(monitor) = 2 AND VALUES(status) = 0, status_changed_at,
+				IF(status <> VALUES(status), VALUES(status_changed_at), status_changed_at)),
+			status = IF(VALUES(monitor) = 2 AND VALUES(status) = 0, status, VALUES(status)),
+			type = VALUES(type), status_hint = VALUES(status_hint),
 			monitor = VALUES(monitor), monitor_mode = VALUES(monitor_mode),
 			pending_action = VALUES(pending_action), collected_at = VALUES(collected_at),
 			data = VALUES(data), updated_at = VALUES(updated_at)`)
