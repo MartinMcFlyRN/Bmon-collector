@@ -92,9 +92,13 @@ func TestSlackPayload(t *testing.T) {
 		!strings.Contains(m.Text, "HOST UP: mail01.example.com") {
 		t.Fatalf("headline: %q", m.Text)
 	}
-	if !strings.Contains(m.Attachments[0].Blocks[0].Text.Text, "process is not running") ||
-		!strings.Contains(m.Attachments[0].Blocks[1].Elements[0].Text, "Does not exist") {
+	if !strings.Contains(m.Attachments[0].Blocks[0].Text.Text, "process is not running") {
 		t.Fatalf("service failed: %+v", m.Attachments[0])
+	}
+	for i, a := range m.Attachments {
+		if len(a.Blocks) != 1 {
+			t.Errorf("attachment %d: want only the main section, got %d blocks", i, len(a.Blocks))
+		}
 	}
 
 	// plain fallback layout, no mention, no headline for service-only batches
@@ -108,7 +112,7 @@ func TestSlackPayload(t *testing.T) {
 
 func TestSlackEscape(t *testing.T) {
 	n := Notification{Kind: KindServiceFailed, Host: "a<b>", Service: "x&y", Message: "<script>"}
-	main, _, _ := render(n)
+	main, _ := render(n)
 	if strings.Contains(main, "<script>") || !strings.Contains(main, "&lt;script&gt;") || !strings.Contains(main, "x&amp;y") {
 		t.Fatalf("not escaped: %s", main)
 	}

@@ -362,14 +362,6 @@ func slackEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
 
-func slackDate(t time.Time) string {
-	if t.IsZero() {
-		t = time.Now()
-	}
-	return fmt.Sprintf("<!date^%d^{date_short_pretty} {time_secs}|%s>",
-		t.Unix(), t.UTC().Format("2006-01-02 15:04:05 UTC"))
-}
-
 func quote(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -400,23 +392,16 @@ func hostList(hosts []string) string {
 	return b.String()
 }
 
-// render returns the main text, the context line and the plain fallback of a notification.
-func render(n Notification) (main, context, fallback string) {
+// render returns the text and the plain fallback of a notification.
+func render(n Notification) (main, fallback string) {
 	host := "*" + slackEscape(n.Host) + "*"
 	svc := "`" + slackEscape(n.Service) + "`"
-	typ := ServiceTypeNames[n.ServiceType]
-	if typ != "" {
-		typ = strings.ToUpper(typ[:1]) + typ[1:]
-	}
-	ctx := []string{}
 	switch n.Kind {
 	case KindServiceFailed:
 		main = ":red_circle: *Service failed* · " + svc + " on " + host + quote(n.Message)
-		ctx = append(ctx, typ, eventName(n.EventID))
 		fallback = fmt.Sprintf("FAILED %s on %s: %s", n.Service, n.Host, n.Message)
 	case KindServiceOK:
 		main = ":large_green_circle: *Service OK* · " + svc + " on " + host + quote(n.Message)
-		ctx = append(ctx, typ, eventName(n.EventID))
 		fallback = fmt.Sprintf("OK %s on %s: %s", n.Service, n.Host, n.Message)
 	case KindMonitStopped:
 		main = ":octagonal_sign: *Monit stopped* on " + host + quote(n.Message)
@@ -427,7 +412,6 @@ func render(n Notification) (main, context, fallback string) {
 	case KindHostDown:
 		main = fmt.Sprintf(":rotating_light: *HOST DOWN* · %s\nNo report from Monit for *%s* (threshold %s).",
 			host, fmtDur(n.Duration), fmtDur(n.Threshold))
-		ctx = append(ctx, "Last report "+slackDate(n.LastReport))
 		fallback = fmt.Sprintf("HOST DOWN %s: no report for %s", n.Host, fmtDur(n.Duration))
 	case KindHostUp:
 		main = fmt.Sprintf(":white_check_mark: *HOST UP* · %s\nMonit is reporting again after *%s*.", host, fmtDur(n.Duration))
@@ -458,22 +442,7 @@ func render(n Notification) (main, context, fallback string) {
 		main = fmt.Sprintf(":white_check_mark: *%d HOSTS UP*: Monit is reporting again.\n%s", n.Count, hostList(n.Hosts))
 		fallback = fmt.Sprintf("%d hosts back up", n.Count)
 	}
-	if n.Remote != "" {
-		ctx = append(ctx, slackEscape(n.Remote))
-	}
-	if n.Kind != KindHostDown {
-		ctx = append(ctx, slackDate(n.Time))
-	}
-	if n.Kind == KindEmergencyOver && n.Count > 0 {
-		ctx = append(ctx, "hosts still down will be notified one by one when they come back")
-	}
-	var parts []string
-	for _, c := range ctx {
-		if c != "" {
-			parts = append(parts, c)
-		}
-	}
-	return main, strings.Join(parts, " · "), fallback
+	return main, fallback
 }
 
 func (s *SlackNotifier) buildPayload(batch []Notification, withBlocks bool) []byte {
@@ -482,9 +451,8 @@ func (s *SlackNotifier) buildPayload(batch []Notification, withBlocks bool) []by
 		Text string `json:"text"`
 	}
 	type block struct {
-		Type     string `json:"type"`
-		Text     *text  `json:"text,omitempty"`
-		Elements []text `json:"elements,omitempty"`
+		Type string `json:"type"`
+		Text *text  `json:"text,omitempty"`
 	}
 	type attachment struct {
 		Color    string   `json:"color"`
@@ -500,21 +468,15 @@ func (s *SlackNotifier) buildPayload(batch []Notification, withBlocks bool) []by
 
 	var down, up, head []string
 	for _, n := range batch {
-		main, ctx, fb := render(n)
+		main, fb := render(n)
 		a := attachment{Color: slackGreen, Fallback: fb}
 		if n.Kind.Problem() {
 			a.Color = slackRed
 		}
 		if withBlocks {
 			a.Blocks = []block{{Type: "section", Text: &text{"mrkdwn", main}}}
-			if ctx != "" {
-				a.Blocks = append(a.Blocks, block{Type: "context", Elements: []text{{"mrkdwn", ctx}}})
-			}
 		} else {
 			a.Text = main
-			if ctx != "" {
-				a.Text += "\n" + ctx
-			}
 			a.MrkdwnIn = []string{"text"}
 		}
 		payload.Attachments = append(payload.Attachments, a)

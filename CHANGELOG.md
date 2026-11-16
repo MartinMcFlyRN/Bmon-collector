@@ -4,6 +4,13 @@ This project follows [Semantic Versioning](https://semver.org/).
 Until 1.0, the database schema and configuration may change between minor
 versions; the notes always say what to do.
 
+## [0.7.1] - 2026-11-16
+
+- Changed: Slack notifications no longer have the small grey line at the bottom
+  (service type, event type, IP address, time): only the main text is sent.
+
+Upgrade: replace the binary and restart.
+
 ## [0.7.0] - 2026-11-15
 
 - Added: emergency mode. When `BMON_EMERGENCY_HOSTS` hosts (default 10) go down
