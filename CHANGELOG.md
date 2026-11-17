@@ -4,6 +4,21 @@ This project follows [Semantic Versioning](https://semver.org/).
 Until 1.0, the database schema and configuration may change between minor
 versions; the notes always say what to do.
 
+## [0.8.0] - 2026-11-17
+
+- Added: Slack notifications by service group. `BMON_SLACK_ALWAYS_GROUPS` (e.g.
+  `H24`) are notified at any time, `BMON_SLACK_OFFICE_GROUPS` (e.g. `workday`)
+  only during `BMON_OFFICE_HOURS` (default `mon-fri 08:00-13:00,14:00-18:00`) in
+  `BMON_TIMEZONE` (default `Europe/Rome`). Failures of office-hours services
+  outside office hours are held and notified at the opening if still failing;
+  recoveries of notified failures are always sent. `BMON_SLACK_UNGROUPED` sets
+  the policy for services in no listed group (default `always`).
+- The timezone database is embedded in the binary.
+
+Upgrade: replace the binary, add the new variables to `/etc/bmon-collector/env`
+(see `deploy/env.example`), restart. No schema changes. Without the new
+variables the behaviour is unchanged.
+
 ## [0.7.4] - 2026-11-17
 
 - Changed: inside the colored Slack boxes the status emoji (large in Slack) are

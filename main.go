@@ -28,7 +28,7 @@ import (
 // time with -ldflags "-X main.Version=0.1.0-dev+abc123".
 const Name = "Bmon collector"
 
-var Version = "0.7.4"
+var Version = "0.8.0"
 
 type config struct {
 	listen         string
@@ -53,6 +53,10 @@ type config struct {
 	emergencyHosts int
 	emergencyWin   time.Duration
 	emergencyUpd   time.Duration
+	alwaysGroups   []string
+	officeGroups   []string
+	ungrouped      Policy
+	officeHours    *OfficeHours
 }
 
 type credential struct{ user, pass string }
@@ -128,6 +132,16 @@ func loadConfig() (*config, error) {
 		"window for the emergency threshold (env BMON_EMERGENCY_WINDOW)")
 	flag.DurationVar(&c.emergencyUpd, "emergency-update", envDur("BMON_EMERGENCY_UPDATE", 3*time.Minute),
 		"minimum interval between emergency progress updates (env BMON_EMERGENCY_UPDATE)")
+	var alwaysGroups, officeGroups, ungrouped, officeHours, tz string
+	flag.StringVar(&alwaysGroups, "slack-always-groups", env("BMON_SLACK_ALWAYS_GROUPS", ""),
+		"service groups notified at any time, e.g. H24 (env BMON_SLACK_ALWAYS_GROUPS)")
+	flag.StringVar(&officeGroups, "slack-office-groups", env("BMON_SLACK_OFFICE_GROUPS", ""),
+		"service groups notified only during office hours, e.g. workday (env BMON_SLACK_OFFICE_GROUPS)")
+	flag.StringVar(&ungrouped, "slack-ungrouped", env("BMON_SLACK_UNGROUPED", "always"),
+		"services in none of those groups: always, office or never (env BMON_SLACK_UNGROUPED)")
+	flag.StringVar(&officeHours, "office-hours", env("BMON_OFFICE_HOURS", "mon-fri 08:00-13:00,14:00-18:00"),
+		"office hours (env BMON_OFFICE_HOURS)")
+	flag.StringVar(&tz, "timezone", env("BMON_TIMEZONE", "Europe/Rome"), "timezone of the office hours (env BMON_TIMEZONE)")
 	flag.BoolVar(&c.slackTest, "slack-test", false, "send one sample message of each kind to Slack and exit")
 	flag.StringVar(&c.logLevel, "log-level", env("BMON_LOG_LEVEL", "info"), "debug|info|warn|error")
 	showVersion := flag.Bool("version", false, "print the version and exit")
@@ -138,6 +152,24 @@ func loadConfig() (*config, error) {
 	if *showVersion {
 		fmt.Printf("%s %s\n", Name, Version)
 		os.Exit(0)
+	}
+	split := func(s string) []string {
+		var out []string
+		for _, p := range strings.Split(s, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	c.alwaysGroups, c.officeGroups = split(alwaysGroups), split(officeGroups)
+	pol, err := ParsePolicy(ungrouped)
+	if err != nil {
+		return nil, fmt.Errorf("slack-ungrouped: %w", err)
+	}
+	c.ungrouped = pol
+	if c.officeHours, err = ParseOfficeHours(officeHours, tz); err != nil {
+		return nil, err
 	}
 	kinds, err := ParseKinds(slackNotify)
 	if err != nil {
@@ -464,6 +496,15 @@ func main() {
 	var inner Notifier
 	if slack != nil {
 		inner = slack
+		// Per-group schedule (H24 / office hours), only if some group is configured.
+		if len(cfg.alwaysGroups)+len(cfg.officeGroups) > 0 || cfg.ungrouped != PolicyAlways {
+			sched := NewGroupSchedule(slack, cfg.alwaysGroups, cfg.officeGroups, cfg.ungrouped, cfg.officeHours, log)
+			go sched.Run(ctx)
+			inner = sched
+			log.Info("Slack schedule by service group", "always", strings.Join(cfg.alwaysGroups, ","),
+				"office", strings.Join(cfg.officeGroups, ","), "ungrouped", []string{"always", "office", "never"}[cfg.ungrouped],
+				"office_hours", cfg.officeHours.String())
+		}
 	}
 	emergency := NewEmergency(inner, cfg.emergencyHosts, cfg.emergencyWin, log)
 	emergency.Update = cfg.emergencyUpd

@@ -1,6 +1,6 @@
 # Bmon collector
 
-Version **0.7.4**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
+Version **0.8.0**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
 receives the reports that Monit agents send with `set mmonit` and stores them
 in MySQL/MariaDB.
 
@@ -91,6 +91,11 @@ Configuration (environment variables or flags, see `bmon-collector -h`):
 | `BMON_SLACK_WEBHOOK` | `-slack-webhook` | empty | Slack incoming webhook URL; empty = no Slack notifications |
 | `BMON_SLACK_MENTION` | `-slack-mention` | `<!channel>` | mention added to host down messages; empty = none |
 | `BMON_SLACK_NOTIFY` | `-slack-notify` | `all` | which notifications to send, see below |
+| `BMON_SLACK_ALWAYS_GROUPS` | `-slack-always-groups` | empty | service groups notified at any time, e.g. `H24` |
+| `BMON_SLACK_OFFICE_GROUPS` | `-slack-office-groups` | empty | service groups notified only during office hours, e.g. `workday` |
+| `BMON_SLACK_UNGROUPED` | `-slack-ungrouped` | `always` | services in none of those groups: `always`, `office` or `never` |
+| `BMON_OFFICE_HOURS` | `-office-hours` | `mon-fri 08:00-13:00,14:00-18:00` | office hours |
+| `BMON_TIMEZONE` | `-timezone` | `Europe/Rome` | timezone of the office hours (CET/CEST handled) |
 | `BMON_EMERGENCY_HOSTS` | `-emergency-hosts` | `10` | hosts down within the window that start an emergency; `0` = disabled |
 | `BMON_EMERGENCY_WINDOW` | `-emergency-window` | `5m` | window for the emergency threshold |
 | `BMON_EMERGENCY_UPDATE` | `-emergency-update` | `3m` | minimum interval between emergency updates |
@@ -234,6 +239,43 @@ Behaviour:
 - Stopping Monit on a host produces `monit_stopped` and, once the offline
   threshold is passed, `host_down`: the collector cannot tell an intentional stop
   from a crash.
+
+## Notifications by service group (H24 / office hours)
+
+Service failed / OK notifications can follow the Monit `group` of the service:
+
+```sh
+BMON_SLACK_ALWAYS_GROUPS=H24          # notified at any time
+BMON_SLACK_OFFICE_GROUPS=workday      # notified only during office hours
+BMON_OFFICE_HOURS=mon-fri 08:00-13:00,14:00-18:00
+BMON_TIMEZONE=Europe/Rome
+```
+
+- A service in an "always" group is notified at any time; "always" wins when a
+  service is in both kinds of group. Group names are case-insensitive, several
+  can be listed separated by commas.
+- A service in an "office" group is notified only during office hours. Outside
+  them (evening, night, weekend, lunch break) its failure is **held**:
+  - if it is still failing when the office opens, it is notified then, with
+    "failing since …" in the message;
+  - if it recovers meanwhile, nothing is sent.
+- A recovery whose failure was notified is always sent, also outside office hours,
+  so a red message in the channel always gets its green one.
+- Services in none of the listed groups follow `BMON_SLACK_UNGROUPED`
+  (default `always`, as before).
+- Host down/up, Monit stopped/started and emergencies are not affected: they are
+  always sent.
+- Without `BMON_SLACK_ALWAYS_GROUPS` / `BMON_SLACK_OFFICE_GROUPS`, everything is
+  sent as before.
+
+`BMON_OFFICE_HOURS` takes days (`mon-fri`, `mon,wed,fri`, `sat`) and one or more
+time ranges (`08:00-13:00,14:00-18:00`, end excluded). Public holidays are not
+known: they count as working days. Held failures are kept in memory: if the
+collector is restarted outside office hours they are not notified at the opening
+(they are still in the database and in Bmon-web).
+
+The log shows `notification held until office hours`, `notification held:
+recovered outside office hours` and `office hours started: sending held failures`.
 
 ## Emergency mode
 

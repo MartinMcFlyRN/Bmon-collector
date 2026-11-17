@@ -103,6 +103,9 @@ type Notification struct {
 	Recovered  int      // hosts back up during the emergency
 	Suppressed int      // service/Monit notifications not sent
 	Previous   int      // hosts down in the previous emergency message
+
+	Groups []string // service groups (service failed/OK)
+	Note   string   // extra line, e.g. "failing since ..." for held failures
 }
 
 // Notifier receives notifications. Implementations must not block.
@@ -459,6 +462,9 @@ func render(n Notification) (main, fallback string) {
 	case KindHostsUp:
 		main = fmt.Sprintf(symOK+" *%d HOSTS UP*: Monit is reporting again.\n%s", n.Count, hostList(n.Hosts))
 		fallback = fmt.Sprintf("%d hosts back up", n.Count)
+	}
+	if n.Note != "" {
+		main += "\n_" + slackEscape(n.Note) + "_"
 	}
 	return main, fallback
 }
