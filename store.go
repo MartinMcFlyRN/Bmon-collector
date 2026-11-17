@@ -188,6 +188,12 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 	if err := s.syncGroups(ctx, tx, hostID, r.Groups); err != nil {
 		return fmt.Errorf("groups: %w", err)
 	}
+	initializing := make(map[string]bool, len(r.Services))
+	for _, sv := range r.Services {
+		if sv.Monitor == 2 {
+			initializing[sv.Name] = true
+		}
+	}
 	var notes []Notification
 	for _, e := range r.Events {
 		res, err := tx.ExecContext(ctx, `
@@ -204,7 +210,7 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 			continue
 		}
 		prev, known := existing[e.Service]
-		if kind, ok := classifyEvent(e, prev.status, known); ok {
+		if kind, ok := classifyEvent(e, prev.status, known, initializing[e.Service]); ok {
 			notes = append(notes, Notification{
 				Kind: kind, Host: r.Server.LocalHostname, Remote: remoteAddr,
 				Service: e.Service, ServiceType: e.ServiceType, EventID: e.ID,

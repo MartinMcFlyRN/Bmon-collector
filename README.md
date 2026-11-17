@@ -1,6 +1,6 @@
 # Bmon collector
 
-Version **0.7.2**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
+Version **0.7.3**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
 receives the reports that Monit agents send with `set mmonit` and stores them
 in MySQL/MariaDB.
 
@@ -223,9 +223,8 @@ Behaviour:
 
 - **No duplicates.** Events resent from Monit's eventqueue are already in the
   database and are not notified again. After every start or reload Monit re-sends
-  a "failed" event for each service that is still failing: those are not notified
-  again either; a failure is notified only when that failure was not already
-  known for the service. Reload events and "action done" events are not notified.
+  a "failed" event for each service that is still failing, while the service is
+  still initializing: those are not notified again either. Reload events and "action done" events are not notified.
 - **Bursts are grouped**: notifications arriving within 2 seconds are sent as one
   message (up to 10), and messages are paced at about one per second as Slack
   requires. A network failure towards Slack is retried with backoff; Slack being

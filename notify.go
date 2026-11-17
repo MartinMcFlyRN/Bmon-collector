@@ -143,13 +143,16 @@ func eventName(id int64) string {
 
 // classifyEvent decides whether a Monit event becomes a notification.
 // prevStatus is the service status stored before this report (known=false
-// for a service seen for the first time).
+// for a service seen for the first time); initializing is true when the
+// service is reported with monitor=2 in the same report as the event.
 //
 // After every start or reload Monit re-sends a "failed" event for each
-// service that is still failing. To avoid flooding the channel on each
-// reload, a failure is notified only when that specific failure bit was not
-// already set on the service.
-func classifyEvent(e Event, prevStatus int64, known bool) (Kind, bool) {
+// service that is still failing, and it does so while the service is still
+// initializing (monitor=2). Only that case is treated as a re-send: the event
+// type is too coarse to compare on its own (several rules of a service share
+// it, e.g. loadavg 1min/5min and memory are all "Resource"), so a rule that
+// keeps failing must not hide a new failure of another rule of the same type.
+func classifyEvent(e Event, prevStatus int64, known, initializing bool) (Kind, bool) {
 	switch e.ID {
 	case EventInstance:
 		switch {
@@ -164,8 +167,8 @@ func classifyEvent(e Event, prevStatus int64, known bool) (Kind, bool) {
 	}
 	switch e.State {
 	case StateFailed, StateChanged:
-		if known && prevStatus&e.ID != 0 {
-			return 0, false // already failing for this reason
+		if initializing && known && prevStatus&e.ID != 0 {
+			return 0, false // re-sent after a Monit start/reload: already notified
 		}
 		return KindServiceFailed, true
 	case StateSucceeded, StateChangedNot:

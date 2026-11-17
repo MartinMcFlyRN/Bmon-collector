@@ -4,6 +4,17 @@ This project follows [Semantic Versioning](https://semver.org/).
 Until 1.0, the database schema and configuration may change between minor
 versions; the notes always say what to do.
 
+## [0.7.3] - 2026-11-17
+
+- Fixed: "service failed" Slack notifications were missing when another rule of
+  the same type on the same service was already failing (e.g. `loadavg (1min)`
+  while `loadavg (5min)` keeps failing: both are Resource events), so only the
+  "service OK" notifications arrived. A failure is now treated as a Monit re-send
+  (and not notified) only when it arrives while the service is still
+  initializing after a Monit start/reload, which is when Monit re-sends them.
+
+Upgrade: replace the binary and restart. No schema changes.
+
 ## [0.7.2] - 2026-11-17
 
 - Fixed: occasional deadlocks ("database conflict, retrying ... services

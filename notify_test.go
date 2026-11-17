@@ -12,24 +12,27 @@ func TestClassifyEvent(t *testing.T) {
 		e      Event
 		prev   int64
 		known  bool
+		init   bool
 		want   Kind
 		notify bool
 	}{
-		{"monit started", Event{ID: EventInstance, Action: ActionStart, State: 2, Message: "Monit 5.33.0 started"}, 0, false, KindMonitStarted, true},
-		{"monit stopped", Event{ID: EventInstance, Action: ActionStop, State: 2, Message: "Monit 5.33.0 stopped"}, 0, false, KindMonitStopped, true},
-		{"monit reloaded", Event{ID: EventInstance, Action: ActionStart, State: 2, Message: "Monit reloaded"}, 0, false, 0, false},
-		{"action done", Event{ID: EventAction, State: 2, Message: "restart action done"}, 0, true, 0, false},
-		{"new failure", Event{ID: 0x200, State: StateFailed}, 0, true, KindServiceFailed, true},
-		{"failure on new service", Event{ID: 0x200, State: StateFailed}, 0, false, KindServiceFailed, true},
-		{"re-sent after reload", Event{ID: 0x200, State: StateFailed}, 0x200, true, 0, false},
-		{"different failure", Event{ID: 0x20, State: StateFailed}, 0x200, true, KindServiceFailed, true},
-		{"changed", Event{ID: 0x1, State: StateChanged}, 0, true, KindServiceFailed, true},
-		{"recovered", Event{ID: 0x200, State: StateSucceeded}, 0x200, true, KindServiceOK, true},
-		{"changed not", Event{ID: 0x1, State: StateChangedNot}, 0x1, true, KindServiceOK, true},
-		{"init", Event{ID: 0x200, State: 4}, 0, true, 0, false},
+		{"monit started", Event{ID: EventInstance, Action: ActionStart, State: 2, Message: "Monit 5.33.0 started"}, 0, false, false, KindMonitStarted, true},
+		{"monit stopped", Event{ID: EventInstance, Action: ActionStop, State: 2, Message: "Monit 5.33.0 stopped"}, 0, false, false, KindMonitStopped, true},
+		{"monit reloaded", Event{ID: EventInstance, Action: ActionStart, State: 2, Message: "Monit reloaded"}, 0, false, false, 0, false},
+		{"action done", Event{ID: EventAction, State: 2, Message: "restart action done"}, 0, true, false, 0, false},
+		{"new failure", Event{ID: 0x200, State: StateFailed}, 0, true, false, KindServiceFailed, true},
+		{"failure on new service", Event{ID: 0x200, State: StateFailed}, 0, false, true, KindServiceFailed, true},
+		{"re-sent after start/reload", Event{ID: 0x200, State: StateFailed}, 0x200, true, true, 0, false},
+		// loadavg (1min) failing while loadavg (5min) is still failing: both are Resource (0x2)
+		{"same type, other rule failing", Event{ID: 0x2, State: StateFailed}, 0x2, true, false, KindServiceFailed, true},
+		{"different failure while initializing", Event{ID: 0x20, State: StateFailed}, 0x200, true, true, KindServiceFailed, true},
+		{"changed", Event{ID: 0x1, State: StateChanged}, 0, true, false, KindServiceFailed, true},
+		{"recovered", Event{ID: 0x200, State: StateSucceeded}, 0x200, true, false, KindServiceOK, true},
+		{"changed not", Event{ID: 0x1, State: StateChangedNot}, 0x1, true, false, KindServiceOK, true},
+		{"init", Event{ID: 0x200, State: 4}, 0, true, false, 0, false},
 	}
 	for _, c := range cases {
-		k, ok := classifyEvent(c.e, c.prev, c.known)
+		k, ok := classifyEvent(c.e, c.prev, c.known, c.init)
 		if ok != c.notify || (ok && k != c.want) {
 			t.Errorf("%s: got %v/%v, want %v/%v", c.name, k, ok, c.want, c.notify)
 		}

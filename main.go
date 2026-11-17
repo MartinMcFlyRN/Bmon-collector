@@ -28,7 +28,7 @@ import (
 // time with -ldflags "-X main.Version=0.1.0-dev+abc123".
 const Name = "Bmon collector"
 
-var Version = "0.7.2"
+var Version = "0.7.3"
 
 type config struct {
 	listen         string
