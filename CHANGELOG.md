@@ -4,6 +4,23 @@ This project follows [Semantic Versioning](https://semver.org/).
 Until 1.0, the database schema and configuration may change between minor
 versions; the notes always say what to do.
 
+## [0.7.2] - 2026-11-17
+
+- Fixed: occasional deadlocks ("database conflict, retrying ... services
+  cleanup: Error 1213"). The DELETE of services removed from monitrc ran on every
+  report and could scan and lock rows of other hosts; services are now deleted by
+  id and only when they really disappeared. Service groups are written only when
+  they change, instead of delete+insert on every report.
+- Added: admission control for bursts. At most `BMON_MAX_INFLIGHT` reports are
+  stored at a time (default = `BMON_DB_CONNS`); a report waiting longer than
+  `BMON_QUEUE_WAIT` (1s) is refused with 503 so that Monit retries on its next
+  cycle instead of timing out. `/healthz` reports `busy_503` and `inflight`.
+- Changed: `-db-timeout` default from 10s to 3s, so the answer always arrives
+  within Monit's default 5 s timeout; new env vars `BMON_DB_CONNS`,
+  `BMON_DB_TIMEOUT`, `BMON_MAX_INFLIGHT`, `BMON_QUEUE_WAIT`.
+
+Upgrade: replace the binary and restart. No schema changes.
+
 ## [0.7.1] - 2026-11-16
 
 - Changed: Slack notifications no longer have the small grey line at the bottom

@@ -28,7 +28,7 @@ import (
 // time with -ldflags "-X main.Version=0.1.0-dev+abc123".
 const Name = "Bmon collector"
 
-var Version = "0.7.1"
+var Version = "0.7.2"
 
 type config struct {
 	listen         string
@@ -38,6 +38,8 @@ type config struct {
 	maxBody        int64
 	maxConns       int
 	dbTimeout      time.Duration
+	maxInflight    int
+	queueWait      time.Duration
 	eventRetention time.Duration
 	logLevel       string
 	offline        OfflinePolicy
@@ -96,8 +98,13 @@ func loadConfig() (*config, error) {
 	flag.StringVar(&proxies, "trusted-proxies", env("BMON_TRUSTED_PROXIES", "127.0.0.1/32,::1/128"),
 		"CIDRs of reverse proxies trusted for X-Real-IP / X-Forwarded-For (env BMON_TRUSTED_PROXIES)")
 	flag.Int64Var(&c.maxBody, "max-body", 16<<20, "maximum payload size in bytes")
-	flag.IntVar(&c.maxConns, "db-conns", 20, "maximum database connections")
-	flag.DurationVar(&c.dbTimeout, "db-timeout", 10*time.Second, "timeout for storing a single report")
+	flag.IntVar(&c.maxConns, "db-conns", envInt("BMON_DB_CONNS", 20), "maximum database connections (env BMON_DB_CONNS)")
+	flag.DurationVar(&c.dbTimeout, "db-timeout", envDur("BMON_DB_TIMEOUT", 3*time.Second),
+		"time budget for storing a single report, retries included (env BMON_DB_TIMEOUT)")
+	flag.IntVar(&c.maxInflight, "max-inflight", envInt("BMON_MAX_INFLIGHT", 0),
+		"reports stored at the same time; 0 = same as -db-conns (env BMON_MAX_INFLIGHT)")
+	flag.DurationVar(&c.queueWait, "queue-wait", envDur("BMON_QUEUE_WAIT", time.Second),
+		"how long a report may wait for a free slot before getting 503 (env BMON_QUEUE_WAIT)")
 	flag.IntVar(&retentionDays, "event-retention-days", 180, "days of event history to keep (0 = forever)")
 	flag.IntVar(&c.offline.Cycles, "offline-cycles", envInt("BMON_OFFLINE_CYCLES", 3),
 		"mark a host offline after this many poll cycles without a report (env BMON_OFFLINE_CYCLES)")
@@ -174,6 +181,9 @@ func loadConfig() (*config, error) {
 		c.trustedProxies = append(c.trustedProxies, n)
 	}
 	c.eventRetention = time.Duration(retentionDays) * 24 * time.Hour
+	if c.maxInflight <= 0 || c.maxInflight > c.maxConns {
+		c.maxInflight = c.maxConns
+	}
 	return c, nil
 }
 
@@ -194,7 +204,7 @@ func normalizeDSN(dsn string) string {
 }
 
 type stats struct {
-	reports, events, rejected, failed atomic.Int64
+	reports, events, rejected, failed, busy atomic.Int64
 }
 
 type server struct {
@@ -203,6 +213,9 @@ type server struct {
 	log       *slog.Logger
 	stats     stats
 	emergency *Emergency
+	slots     chan struct{} // admission control: one token per report being stored
+	inflight  atomic.Int64
+	lastBusy  atomic.Int64 // unix seconds of the last "busy" log line
 }
 
 func (s *server) checkAuth(r *http.Request) bool {
@@ -280,6 +293,31 @@ func (s *server) handleCollector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Admission control. Monit waits only a few seconds for an answer (the
+	// mmonit timeout, 5 s by default): during a burst (all hosts reconnecting
+	// after an outage, eventqueue backlogs) it is better to answer 503 at once
+	// and let Monit retry on its next cycle than to pile up requests that Monit
+	// has already given up on.
+	wait := time.NewTimer(s.cfg.queueWait)
+	select {
+	case s.slots <- struct{}{}:
+		wait.Stop()
+	case <-wait.C:
+		n := s.stats.busy.Add(1)
+		if now := time.Now().Unix(); s.lastBusy.Swap(now) != now { // at most one line per second
+			s.log.Warn("collector busy, report refused with 503 (Monit will retry)",
+				"host", rep.Server.LocalHostname, "inflight", s.inflight.Load(), "refused_total", n)
+		}
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+		return
+	case <-r.Context().Done():
+		wait.Stop()
+		return
+	}
+	s.inflight.Add(1)
+	defer func() { s.inflight.Add(-1); <-s.slots }()
+
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.dbTimeout)
 	defer cancel()
 	start := time.Now()
@@ -316,8 +354,9 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.emergency != nil && s.emergency.Active() {
 		em = 1
 	}
-	fmt.Fprintf(w, "ok\nversion %s\nemergency %d\nhosts %d\nhosts_offline %d\nreports %d\nevents %d\nrejected %d\nstorage_errors %d\n",
-		Version, em, total, offline, s.stats.reports.Load(), s.stats.events.Load(), s.stats.rejected.Load(), s.stats.failed.Load())
+	fmt.Fprintf(w, "ok\nversion %s\nemergency %d\nhosts %d\nhosts_offline %d\nreports %d\nevents %d\nrejected %d\nstorage_errors %d\nbusy_503 %d\ninflight %d\n",
+		Version, em, total, offline, s.stats.reports.Load(), s.stats.events.Load(), s.stats.rejected.Load(), s.stats.failed.Load(),
+		s.stats.busy.Load(), s.inflight.Load())
 }
 
 func (s *server) offlineLoop(ctx context.Context) {
@@ -434,7 +473,7 @@ func main() {
 		log.Info("emergency detection enabled", "hosts", cfg.emergencyHosts, "window", cfg.emergencyWin)
 	}
 
-	s := &server{cfg: cfg, store: store, log: log, emergency: emergency}
+	s := &server{cfg: cfg, store: store, log: log, emergency: emergency, slots: make(chan struct{}, cfg.maxInflight)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/collector", s.handleCollector)
 	mux.HandleFunc("/healthz", s.handleHealth)
@@ -460,7 +499,8 @@ func main() {
 
 	log.Info(Name+" listening", "version", Version, "addr", cfg.listen, "credentials", len(cfg.auth),
 		"event_retention_days", strconv.Itoa(int(cfg.eventRetention.Hours()/24)),
-		"offline_after_cycles", cfg.offline.Cycles, "offline_min", cfg.offline.MinSilence)
+		"offline_after_cycles", cfg.offline.Cycles, "offline_min", cfg.offline.MinSilence,
+		"max_inflight", cfg.maxInflight, "queue_wait", cfg.queueWait, "db_timeout", cfg.dbTimeout)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)

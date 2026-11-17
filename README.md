@@ -1,6 +1,6 @@
 # Bmon collector
 
-Version **0.7.1**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
+Version **0.7.2**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
 receives the reports that Monit agents send with `set mmonit` and stores them
 in MySQL/MariaDB.
 
@@ -24,7 +24,7 @@ What it does:
 - stores the **Monit httpd credentials** sent in the reports (optionally encrypted), so that [Bmon-web](https://github.com/MartinMcFlyRN/Bmon-web) can send start/stop/restart/monitor/unmonitor to the agents, like M/Monit
 
 Tested with a real Monit 5.33 + MariaDB 10.11. With 500 simulated hosts of 30
-services each: about 365 reports/s on 2 vCPUs, zero errors. 500 hosts with a
+services each: about 350 reports/s on 2 vCPUs, zero errors (see "Sizing and bursts"). 500 hosts with a
 30 s poll interval generate about 17 reports/s.
 
 ## Build
@@ -95,7 +95,10 @@ Configuration (environment variables or flags, see `bmon-collector -h`):
 | `BMON_EMERGENCY_WINDOW` | `-emergency-window` | `5m` | window for the emergency threshold |
 | `BMON_EMERGENCY_UPDATE` | `-emergency-update` | `3m` | minimum interval between emergency updates |
 | | `-event-retention-days` | `180` | `0` = never delete |
-| | `-db-conns` | `20` | |
+| `BMON_DB_CONNS` | `-db-conns` | `20` | maximum database connections |
+| `BMON_MAX_INFLIGHT` | `-max-inflight` | = db-conns | reports stored at the same time |
+| `BMON_QUEUE_WAIT` | `-queue-wait` | `1s` | wait for a free slot before answering 503 |
+| `BMON_DB_TIMEOUT` | `-db-timeout` | `3s` | time budget to store one report, retries included |
 | | `-max-body` | 16 MiB | |
 
 If a password contains `"`, `'`, `\` or `$`, wrap the value in single quotes in
@@ -269,6 +272,47 @@ With 153 of 200 simulated hosts going down at once, the channel receives
 5 messages in total (3 single host down before the threshold, emergency,
 update, end, and one grouped HOST UP for the last 5 hosts) instead of ~20
 messages with `@channel` and ~150 HOST UP.
+
+## Sizing and bursts
+
+Measured on 2 vCPUs with MariaDB on the same machine, 30 services per host:
+
+- 500 hosts posting **at the same instant** are all stored in about 1.5 s
+  (slowest answer 1.5 s). With a 30 s poll interval 500 hosts average about
+  17 reports/s, so there is a wide margin.
+- The real risk is a **burst** larger than that: all hosts reconnecting after an
+  outage while emptying their Monit eventqueue. Monit waits only a few seconds
+  for the answer (`set mmonit ... timeout`, 5 s by default); answers that arrive
+  later are lost for Monit, which resends, so a collector that just queues
+  everything keeps working on reports nobody waits for and the storm repeats
+  on the next cycle.
+
+The collector therefore stores at most `BMON_MAX_INFLIGHT` reports at a time
+(default: as many as the DB connections). A report that does not get a slot
+within `BMON_QUEUE_WAIT` (1 s) is refused immediately with **503**, and a report
+that cannot be stored within `BMON_DB_TIMEOUT` (3 s) gets 503 as well, so the
+answer always arrives within Monit's timeout. Monit retries on its next cycle
+and keeps the events in its eventqueue, so nothing is lost: the backlog is
+spread over a few cycles. In a test with 6000 simultaneous reports, every answer
+arrived within 4.9 s, while 0.7.1 answered 73% of them after Monit's timeout.
+
+The log shows `collector busy, report refused with 503 (Monit will retry)`
+(at most one line per second) and `/healthz` reports `busy_503` and `inflight`.
+An occasional burst is normal; if `busy_503` keeps growing in normal conditions
+the server is undersized: raise `BMON_DB_CONNS` (and MariaDB's `max_connections`)
+or give MariaDB more resources.
+
+Recommendations for hundreds of hosts:
+
+- On the hosts, use `set eventqueue basedir /var/lib/monit/events slots 1000`, so
+  that events are kept while the collector is unreachable or busy.
+- MariaDB: give it an `innodb_buffer_pool_size` large enough for the database
+  (the `services` table is rewritten on every report). If binary logging is
+  enabled, keep in mind that this traffic goes into the binlog too (about 30
+  rows per report).
+- "database conflict, retrying" at DEBUG level is a deadlock that InnoDB
+  resolved and the collector retried: harmless unless it is followed by
+  "failed to store report".
 
 ## Useful queries
 

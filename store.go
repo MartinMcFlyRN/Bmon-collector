@@ -168,21 +168,24 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 			return fmt.Errorf("online event: %w", err)
 		}
 	}
-	// Status of the services before this report, to classify the events.
-	var prevStatus map[string]int64
-	if len(r.Events) > 0 {
-		if prevStatus, err = loadServiceStatus(ctx, tx, hostID); err != nil {
-			return fmt.Errorf("previous status: %w", err)
-		}
+	// Services already stored for the host: their status before this report
+	// (to classify the events) and the ids of those no longer reported.
+	existing, err := loadServices(ctx, tx, hostID)
+	if err != nil {
+		return fmt.Errorf("previous status: %w", err)
 	}
 	if err := s.upsertServices(ctx, tx, hostID, r.Services, now); err != nil {
 		return fmt.Errorf("services: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM services WHERE host_id = ? AND updated_at <> ?`, hostID, now); err != nil {
-		return fmt.Errorf("services cleanup: %w", err)
+	// Delete by primary key, and only when a service really disappeared from
+	// monitrc. A range DELETE on every report deadlocked with concurrent reports.
+	if stale := staleServiceIDs(existing, r.Services); len(stale) > 0 {
+		q := `DELETE FROM services WHERE id IN (?` + strings.Repeat(",?", len(stale)-1) + `)`
+		if _, err := tx.ExecContext(ctx, q, stale...); err != nil {
+			return fmt.Errorf("services cleanup: %w", err)
+		}
 	}
-	if err := s.replaceGroups(ctx, tx, hostID, r.Groups); err != nil {
+	if err := s.syncGroups(ctx, tx, hostID, r.Groups); err != nil {
 		return fmt.Errorf("groups: %w", err)
 	}
 	var notes []Notification
@@ -200,8 +203,8 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 		if n, _ := res.RowsAffected(); n == 0 {
 			continue
 		}
-		prev, known := prevStatus[e.Service]
-		if kind, ok := classifyEvent(e, prev, known); ok {
+		prev, known := existing[e.Service]
+		if kind, ok := classifyEvent(e, prev.status, known); ok {
 			notes = append(notes, Notification{
 				Kind: kind, Host: r.Server.LocalHostname, Remote: remoteAddr,
 				Service: e.Service, ServiceType: e.ServiceType, EventID: e.ID,
@@ -226,22 +229,44 @@ func (s *Store) saveReportTx(ctx context.Context, r *Report, remoteAddr string) 
 	return nil
 }
 
-func loadServiceStatus(ctx context.Context, tx *sql.Tx, hostID uint64) (map[string]int64, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT name, status FROM services WHERE host_id = ?`, hostID)
+type storedService struct {
+	id     uint64
+	status int64
+}
+
+// loadServices reads the services stored for a host (a plain consistent read:
+// the host row is already locked FOR UPDATE, so no other report of the same
+// host can change them meanwhile).
+func loadServices(ctx context.Context, tx *sql.Tx, hostID uint64) (map[string]storedService, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id, name, status FROM services WHERE host_id = ?`, hostID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	m := map[string]int64{}
+	m := map[string]storedService{}
 	for rows.Next() {
 		var name string
-		var st int64
-		if err := rows.Scan(&name, &st); err != nil {
+		var sv storedService
+		if err := rows.Scan(&sv.id, &name, &sv.status); err != nil {
 			return nil, err
 		}
-		m[name] = st
+		m[name] = sv
 	}
 	return m, rows.Err()
+}
+
+func staleServiceIDs(existing map[string]storedService, reported []Service) []any {
+	seen := make(map[string]bool, len(reported))
+	for _, sv := range reported {
+		seen[trunc(sv.Name, 255)] = true
+	}
+	var ids []any
+	for name, sv := range existing {
+		if !seen[name] {
+			ids = append(ids, sv.id)
+		}
+	}
+	return ids
 }
 
 // upsertHost also returns offline_since if the host was marked offline
@@ -479,29 +504,54 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, def string) err
 	return err
 }
 
-// replaceGroups rewrites the host's groups. There are few rows per host,
-// so delete+insert is simpler (and just as cheap) as computing a diff.
-func (s *Store) replaceGroups(ctx context.Context, tx *sql.Tx, hostID uint64, groups map[string][]string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM service_groups WHERE host_id = ?`, hostID); err != nil {
-		return err
-	}
-	var q strings.Builder
-	var args []any
+type groupMember struct{ group, service string }
+
+// syncGroups writes the host's groups only when they changed (groups change
+// only when monitrc is edited), deleting and inserting single rows by primary
+// key. Rewriting them on every report caused lock contention between hosts.
+func (s *Store) syncGroups(ctx context.Context, tx *sql.Tx, hostID uint64, groups map[string][]string) error {
+	want := map[groupMember]bool{}
 	for g, svcs := range groups {
 		for _, sv := range svcs {
-			if len(args) == 0 {
-				q.WriteString(`INSERT IGNORE INTO service_groups (host_id, group_name, service) VALUES (?,?,?)`)
-			} else {
-				q.WriteString(`,(?,?,?)`)
-			}
-			args = append(args, hostID, trunc(g, 255), trunc(sv, 255))
+			want[groupMember{trunc(g, 255), trunc(sv, 255)}] = true
 		}
 	}
-	if len(args) == 0 {
-		return nil
+	rows, err := tx.QueryContext(ctx, `SELECT group_name, service FROM service_groups WHERE host_id = ?`, hostID)
+	if err != nil {
+		return err
 	}
-	_, err := tx.ExecContext(ctx, q.String(), args...)
-	return err
+	have := map[groupMember]bool{}
+	for rows.Next() {
+		var m groupMember
+		if err := rows.Scan(&m.group, &m.service); err != nil {
+			rows.Close()
+			return err
+		}
+		have[m] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for m := range have {
+		if !want[m] {
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM service_groups WHERE host_id = ? AND group_name = ? AND service = ?`,
+				hostID, m.group, m.service); err != nil {
+				return err
+			}
+		}
+	}
+	for m := range want {
+		if !have[m] {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT IGNORE INTO service_groups (host_id, group_name, service) VALUES (?, ?, ?)`,
+				hostID, m.group, m.service); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 const serviceCols = 12
