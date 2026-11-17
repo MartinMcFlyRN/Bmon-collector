@@ -373,6 +373,15 @@ func quote(s string) string {
 	return "\n>" + strings.ReplaceAll(slackEscape(s), "\n", "\n>")
 }
 
+// Status symbols inside the colored boxes. Plain text characters that Slack
+// does not turn into (larger) emoji images: avoid ✔ ✖ ▶ and similar, which it does.
+const (
+	symFail  = "✗"
+	symOK    = "✓"
+	symStop  = "■"
+	symStart = "▸"
+)
+
 // hostList formats host names, keeping the text well below Slack's 3000
 // characters per section.
 func hostList(hosts []string) string {
@@ -398,29 +407,35 @@ func hostList(hosts []string) string {
 // render returns the text and the plain fallback of a notification.
 func render(n Notification) (main, fallback string) {
 	host := "*" + slackEscape(n.Host) + "*"
-	svc := "`" + slackEscape(n.Service) + "`"
+	// Monit names the system check after the host ("check system $HOST"):
+	// show "system" instead of repeating the host name.
+	svcName := n.Service
+	if n.ServiceType == 5 && n.Service == n.Host {
+		svcName = "system"
+	}
+	svc := "`" + slackEscape(svcName) + "`"
 	switch n.Kind {
 	case KindServiceFailed:
-		main = ":red_circle: *Service failed* · " + svc + " on " + host + quote(n.Message)
+		main = symFail + " *Service failed* · " + svc + " on " + host + quote(n.Message)
 		fallback = fmt.Sprintf("FAILED %s on %s: %s", n.Service, n.Host, n.Message)
 	case KindServiceOK:
-		main = ":large_green_circle: *Service OK* · " + svc + " on " + host + quote(n.Message)
+		main = symOK + " *Service OK* · " + svc + " on " + host + quote(n.Message)
 		fallback = fmt.Sprintf("OK %s on %s: %s", n.Service, n.Host, n.Message)
 	case KindMonitStopped:
-		main = ":octagonal_sign: *Monit stopped* on " + host + quote(n.Message)
+		main = symStop + " *Monit stopped* on " + host + quote(n.Message)
 		fallback = fmt.Sprintf("Monit stopped on %s", n.Host)
 	case KindMonitStarted:
-		main = ":arrow_forward: *Monit started* on " + host + quote(n.Message)
+		main = symStart + " *Monit started* on " + host + quote(n.Message)
 		fallback = fmt.Sprintf("Monit started on %s", n.Host)
 	case KindHostDown:
-		main = fmt.Sprintf(":rotating_light: *HOST DOWN* · %s\nNo report from Monit for *%s* (threshold %s).",
+		main = fmt.Sprintf(symFail+" *HOST DOWN* · %s\nNo report from Monit for *%s* (threshold %s).",
 			host, fmtDur(n.Duration), fmtDur(n.Threshold))
 		fallback = fmt.Sprintf("HOST DOWN %s: no report for %s", n.Host, fmtDur(n.Duration))
 	case KindHostUp:
-		main = fmt.Sprintf(":white_check_mark: *HOST UP* · %s\nMonit is reporting again after *%s*.", host, fmtDur(n.Duration))
+		main = fmt.Sprintf(symOK+" *HOST UP* · %s\nMonit is reporting again after *%s*.", host, fmtDur(n.Duration))
 		fallback = fmt.Sprintf("HOST UP %s after %s", n.Host, fmtDur(n.Duration))
 	case KindEmergency:
-		main = fmt.Sprintf(":rotating_light: *EMERGENCY: %d hosts down* within %s.\nSingle host notifications are paused; updates will follow.\n*Down:* %s",
+		main = fmt.Sprintf(symFail+" *EMERGENCY: %d hosts down* within %s.\nSingle host notifications are paused; updates will follow.\n*Down:* %s",
 			n.Count, fmtDur(n.Threshold), hostList(n.Hosts))
 		fallback = fmt.Sprintf("EMERGENCY: %d hosts down", n.Count)
 	case KindEmergencyUpdate:
@@ -431,18 +446,18 @@ func render(n Notification) (main, fallback string) {
 		case n.Count < n.Previous:
 			trend = fmt.Sprintf("−%d since the last update", n.Previous-n.Count)
 		}
-		main = fmt.Sprintf(":rotating_light: *EMERGENCY ongoing* for %s: *%d hosts down* (%s).\n%d of %d back up · %d notifications suppressed\n*Still down:* %s",
+		main = fmt.Sprintf(symFail+" *EMERGENCY ongoing* for %s: *%d hosts down* (%s).\n%d of %d back up · %d notifications suppressed\n*Still down:* %s",
 			fmtDur(n.Duration), n.Count, trend, n.Recovered, n.Involved, n.Suppressed, hostList(n.Hosts))
 		fallback = fmt.Sprintf("EMERGENCY ongoing: %d hosts down", n.Count)
 	case KindEmergencyOver:
-		main = fmt.Sprintf(":white_check_mark: *EMERGENCY OVER* after %s.\n%d of %d hosts back up · %d notifications suppressed (check Bmon-web for the services)",
+		main = fmt.Sprintf(symOK+" *EMERGENCY OVER* after %s.\n%d of %d hosts back up · %d notifications suppressed (check Bmon-web for the services)",
 			fmtDur(n.Duration), n.Recovered, n.Involved, n.Suppressed)
 		if n.Count > 0 {
 			main += fmt.Sprintf("\n*Still down (%d):* %s", n.Count, hostList(n.Hosts))
 		}
 		fallback = fmt.Sprintf("EMERGENCY OVER: %d of %d hosts back up", n.Recovered, n.Involved)
 	case KindHostsUp:
-		main = fmt.Sprintf(":white_check_mark: *%d HOSTS UP*: Monit is reporting again.\n%s", n.Count, hostList(n.Hosts))
+		main = fmt.Sprintf(symOK+" *%d HOSTS UP*: Monit is reporting again.\n%s", n.Count, hostList(n.Hosts))
 		fallback = fmt.Sprintf("%d hosts back up", n.Count)
 	}
 	return main, fallback

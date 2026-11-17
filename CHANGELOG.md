@@ -4,6 +4,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 Until 1.0, the database schema and configuration may change between minor
 versions; the notes always say what to do.
 
+## [0.7.4] - 2026-11-17
+
+- Changed: inside the colored Slack boxes the status emoji (large in Slack) are
+  replaced by plain text symbols: ✗ failed/down, ✓ OK/up, ■ Monit stopped,
+  ▸ Monit started. Emoji remain only in the host down/up and emergency headlines.
+- Changed: for the system check, which Monit names after the host, the message
+  shows `system` instead of repeating the host name (shorter line, less wrapping).
+
+Upgrade: replace the binary and restart.
+
 ## [0.7.3] - 2026-11-17
 
 - Fixed: "service failed" Slack notifications were missing when another rule of
