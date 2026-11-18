@@ -1,6 +1,6 @@
 # Bmon collector
 
-Version **0.8.0**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
+Version **0.8.1**. License: [AGPL-3.0](LICENSE). First component of Bmon, a replacement for M/Monit: it
 receives the reports that Monit agents send with `set mmonit` and stores them
 in MySQL/MariaDB.
 

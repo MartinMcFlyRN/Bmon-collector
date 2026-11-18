@@ -376,11 +376,12 @@ func quote(s string) string {
 	return "\n>" + strings.ReplaceAll(slackEscape(s), "\n", "\n>")
 }
 
-// Status symbols inside the colored boxes. Plain text characters that Slack
-// does not turn into (larger) emoji images: avoid ✔ ✖ ▶ and similar, which it does.
+// Status symbols inside the colored boxes. Failed/OK use Slack emoji so they
+// show in red and green (Slack cannot color text); Monit stop/start stay plain
+// text characters that Slack does not turn into emoji (avoid ✔ ✖ ▶ and similar).
 const (
-	symFail  = "✗"
-	symOK    = "✓"
+	symFail  = ":x:"
+	symOK    = ":white_check_mark:"
 	symStop  = "■"
 	symStart = "▸"
 )

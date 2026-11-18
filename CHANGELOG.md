@@ -4,6 +4,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 Until 1.0, the database schema and configuration may change between minor
 versions; the notes always say what to do.
 
+## [0.8.1] - 2026-11-18
+
+- Changed: in Slack notifications the failed and OK symbols are now the red
+  :x: (❌) and green :white_check_mark: (✅) emoji instead of the plain ✗ and ✓,
+  since Slack cannot color text. This applies to service failed/OK, host
+  down/up and emergency messages. ■ and ▸ (Monit stopped/started) are unchanged.
+
+Upgrade: replace the binary and restart. No schema or configuration changes.
+
 ## [0.8.0] - 2026-11-17
 
 - Added: Slack notifications by service group. `BMON_SLACK_ALWAYS_GROUPS` (e.g.

@@ -125,12 +125,12 @@ func TestRenderSymbolsAndSystemName(t *testing.T) {
 	n := Notification{Kind: KindServiceFailed, Host: "readydigital.customer.xtserver.it",
 		Service: "readydigital.customer.xtserver.it", ServiceType: 5, Message: "loadavg (1min) of 44.4 matches resource limit"}
 	main, _ := render(n)
-	want := "✗ *Service failed* · `system` on *readydigital.customer.xtserver.it*"
+	want := ":x: *Service failed* · `system` on *readydigital.customer.xtserver.it*"
 	if !strings.HasPrefix(main, want) {
 		t.Fatalf("got %q", main)
 	}
 	n = Notification{Kind: KindServiceOK, Host: "web01", Service: "php8.3-fpm-process", ServiceType: 3}
-	if main, _ := render(n); !strings.HasPrefix(main, "✓ *Service OK* · `php8.3-fpm-process` on *web01*") {
+	if main, _ := render(n); !strings.HasPrefix(main, ":white_check_mark: *Service OK* · `php8.3-fpm-process` on *web01*") {
 		t.Fatalf("got %q", main)
 	}
 	for _, n := range SampleNotifications() {
